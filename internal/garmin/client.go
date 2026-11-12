@@ -87,8 +87,15 @@ type Client struct {
 	mu         sync.Mutex
 	token      string
 	tokenExp   time.Time
-	refreshing chan struct{} // non-nil while a token refresh is in flight; closed when done
-	refreshErr error         // result of the last finished refresh
+	refreshing *flight // non-nil while a token refresh is in flight
+}
+
+// flight is one token refresh. Its result is written before done is closed
+// and never changes afterwards, so every waiter sees its own refresh's result.
+type flight struct {
+	done chan struct{}
+	tok  string
+	err  error
 }
 
 // Option configures a Client.
@@ -247,43 +254,38 @@ func (c *Client) bearer(ctx context.Context, force bool) (string, error) {
 		c.mu.Unlock()
 		return tok, nil
 	}
-	ch := c.refreshing
-	if ch == nil {
-		ch = make(chan struct{})
-		c.refreshing = ch
-		go c.refresh(ch) //nolint:gosec // detached on purpose: one caller giving up must not fail the shared refresh
+	f := c.refreshing
+	if f == nil {
+		f = &flight{done: make(chan struct{})}
+		c.refreshing = f
+		go c.refresh(f) //nolint:gosec // detached on purpose: one caller giving up must not fail the shared refresh
 	}
 	c.mu.Unlock()
 
 	select {
-	case <-ch:
+	case <-f.done:
+		return f.tok, f.err
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.refreshErr != nil {
-		return "", c.refreshErr
-	}
-	return c.token, nil
 }
 
 func (c *Client) validLocked() bool {
 	return c.token != "" && c.now().Add(refreshMargin).Before(c.tokenExp)
 }
 
-func (c *Client) refresh(done chan struct{}) {
+func (c *Client) refresh(f *flight) {
 	ctx, cancel := context.WithTimeout(context.Background(), tokenRefreshTimeout)
 	defer cancel()
 	tok, exp, err := c.fetchToken(ctx)
+	f.tok, f.err = tok, err
 	c.mu.Lock()
 	if err == nil {
 		c.token, c.tokenExp = tok, exp
 	}
-	c.refreshErr = err
 	c.refreshing = nil
 	c.mu.Unlock()
-	close(done)
+	close(f.done)
 }
 
 func (c *Client) invalidate(tok string) {
