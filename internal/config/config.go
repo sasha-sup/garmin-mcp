@@ -53,11 +53,9 @@ func env(name string) string { return strings.TrimSpace(os.Getenv(name)) }
 func loadAPIKey(cfg *Config) error {
 	// parseValue drops quotes that `docker run --env-file` passes through
 	// literally; a real key never contains them.
+	// A missing key is not an error here: the server still starts and lists
+	// its tools (catalogs check that), and every call explains how to set it.
 	cfg.APIKey = parseValue(cmp.Or(env(EnvAPIKey), env(EnvAPIKeyAlias)))
-	if cfg.APIKey == "" {
-		return fmt.Errorf("%s is not set: create a key at https://connect.garmin.com/app/settings/personalApiToken "+
-			"and pass it via the environment or -env-file", EnvAPIKey)
-	}
 	return nil
 }
 

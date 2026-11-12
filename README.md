@@ -105,7 +105,7 @@ The Personal API does not expose Training Readiness, Training Status, Acute Load
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `GARMIN_API_KEY` (or `GARMIN_API`) | Personal API key | — (required) |
+| `GARMIN_API_KEY` (or `GARMIN_API`) | Personal API key. Without it the server starts and lists its tools, but every call returns an error explaining how to set it | — (required for data) |
 | `GARMIN_TZ` | Your IANA time zone, e.g. `Europe/Berlin`. Decides what "today" is. `garmin_profile` warns if it differs from your Garmin profile | system zone |
 | `GARMIN_CACHE_DIR` | Cache directory, or `off` | user cache dir: `~/.cache/garmin-mcp` on Linux, `~/Library/Caches/garmin-mcp` on macOS |
 | `GARMIN_REGION` | `global` or `cn` | `global` |

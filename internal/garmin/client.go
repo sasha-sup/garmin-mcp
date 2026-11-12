@@ -39,6 +39,10 @@ const (
 	tokenRefreshTimeout = 2 * time.Minute
 )
 
+// ErrNoAPIKey is returned by every request when no API key is configured.
+var ErrNoAPIKey = errors.New("garmin: GARMIN_API_KEY is not set: create a key at " +
+	"https://connect.garmin.com/app/settings/personalApiToken and pass it via the environment or -env-file")
+
 // ErrNoData means Garmin answered 204 No Content: nothing recorded for the
 // requested day or range.
 var ErrNoData = errors.New("garmin: no data for the requested period")
@@ -109,9 +113,6 @@ func WithUserAgent(ua string) Option { return func(c *Client) { c.ua = ua } }
 // New returns a client for apiKey.
 func New(apiKey string, opts ...Option) (*Client, error) {
 	apiKey = strings.TrimSpace(apiKey)
-	if apiKey == "" {
-		return nil, errors.New("garmin: empty API key")
-	}
 	if strings.ContainsAny(apiKey, " \t\r\n") {
 		return nil, errors.New("garmin: API key contains whitespace; check the env file for stray characters")
 	}
@@ -244,6 +245,9 @@ func (c *Client) do(ctx context.Context, method, u, auth, accept string) (int, [
 // refresh for the others; every caller still returns as soon as its own
 // context is done. The mutex is never held during network I/O.
 func (c *Client) bearer(ctx context.Context, force bool) (string, error) {
+	if c.apiKey == "" {
+		return "", ErrNoAPIKey
+	}
 	c.mu.Lock()
 	if !force && c.validLocked() {
 		tok := c.token

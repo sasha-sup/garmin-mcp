@@ -108,7 +108,6 @@ func TestLoadStripsQuotedKey(t *testing.T) {
 
 func TestLoadErrors(t *testing.T) {
 	cases := map[string]map[string]string{
-		"no key":     {EnvAPIKey: "", EnvAPIKeyAlias: ""},
 		"bad region": {EnvAPIKey: "k", EnvRegion: "eu"},
 		"bad tz":     {EnvAPIKey: "k", EnvTimeZone: "Mars/Base"},
 		"bad level":  {EnvAPIKey: "k", EnvLogLevel: "loud"},

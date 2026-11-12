@@ -106,7 +106,7 @@ Personal API не отдаёт Training Readiness, Training Status, Acute Load �
 
 | Переменная | Назначение | По умолчанию |
 |---|---|---|
-| `GARMIN_API_KEY` (или `GARMIN_API`) | Personal API key | — (обязательно) |
+| `GARMIN_API_KEY` (или `GARMIN_API`) | Personal API key. Без него сервер запускается и показывает список инструментов, но каждый вызов возвращает ошибку с подсказкой, где взять ключ | — (нужен для данных) |
 | `GARMIN_TZ` | Ваш часовой пояс IANA, например `Europe/Berlin`. Определяет, какой день «сегодня». `garmin_profile` предупредит, если он расходится с профилем Garmin | системный |
 | `GARMIN_CACHE_DIR` | Каталог кэша или `off` | пользовательский кэш: `~/.cache/garmin-mcp` в Linux, `~/Library/Caches/garmin-mcp` в macOS |
 | `GARMIN_REGION` | `global` или `cn` | `global` |

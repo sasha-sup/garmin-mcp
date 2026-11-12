@@ -208,10 +208,22 @@ func TestBadKeyErrorDoesNotLeakKey(t *testing.T) {
 }
 
 func TestNewRejectsBadKeys(t *testing.T) {
-	for _, k := range []string{"", "  ", "a b", "a\tb", "a\nb"} {
+	for _, k := range []string{"a b", "a\tb", "a\nb"} {
 		if _, err := New(k); err == nil {
 			t.Errorf("New(%q) succeeded", k)
 		}
+	}
+}
+
+// Without a key the client still works as an object (so the server can start
+// and list tools), but every request fails with instructions.
+func TestMissingKey(t *testing.T) {
+	c, err := New("  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Get(context.Background(), "/x", nil); !errors.Is(err, ErrNoAPIKey) {
+		t.Fatalf("err = %v, want ErrNoAPIKey", err)
 	}
 }
 

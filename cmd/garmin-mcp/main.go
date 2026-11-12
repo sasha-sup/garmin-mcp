@@ -126,6 +126,9 @@ func serve(ctx context.Context, svc *garmin.Service, cfg config.Config, log *slo
 	}, &mcp.ServerOptions{Instructions: tools.Instructions, Logger: log})
 	tools.Register(srv, svc, tools.Options{AllowSensitive: cfg.AllowSensitive})
 
+	if cfg.APIKey == "" {
+		log.Warn("GARMIN_API_KEY is not set: tools are listed but every call will fail until it is configured")
+	}
 	log.Info("garmin-mcp started", "version", buildVersion(), "cache", cfg.CacheDir, "tz", cfg.Location.String())
 	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
 		return err

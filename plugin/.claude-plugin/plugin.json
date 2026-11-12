@@ -1,12 +1,21 @@
 {
   "name": "garmin-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Unofficial MCP server for your own Garmin Connect data: sleep, HRV, heart rate, stress, Body Battery, workouts, with sleep and recovery analysis.",
-  "author": { "name": "sasha-sup", "url": "https://github.com/sasha-sup" },
+  "author": {
+    "name": "sasha-sup",
+    "url": "https://github.com/sasha-sup"
+  },
   "homepage": "https://github.com/sasha-sup/garmin-mcp",
   "repository": "https://github.com/sasha-sup/garmin-mcp",
   "license": "MIT",
-  "keywords": ["garmin", "sleep", "hrv", "health", "mcp"],
+  "keywords": [
+    "garmin",
+    "sleep",
+    "hrv",
+    "health",
+    "mcp"
+  ],
   "userConfig": {
     "garmin_api_key": {
       "type": "string",
