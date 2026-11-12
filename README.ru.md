@@ -188,3 +188,7 @@ internal/civil/      календарная дата без времени
 Официальная OpenAPI-спека Garmin встроена в страницу
 <https://developer.garmin.com/gc-developer-program/personal/swagger-docs/>; форматы ответов в
 `internal/garmin/models.go` сверены с живыми ответами API (ноябрь 2026).
+
+## Лицензия
+
+[MIT](LICENSE). Руководство для контрибьюторов и AI-агентов: [AGENTS.md](AGENTS.md) (на английском).

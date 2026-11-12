@@ -188,3 +188,7 @@ internal/civil/      calendar date without time
 Garmin's official OpenAPI spec is embedded in
 <https://developer.garmin.com/gc-developer-program/personal/swagger-docs/>; the response formats in
 `internal/garmin/models.go` were checked against live API responses (November 2026).
+
+## License
+
+[MIT](LICENSE). Contributor and AI-agent guide: [AGENTS.md](AGENTS.md).
