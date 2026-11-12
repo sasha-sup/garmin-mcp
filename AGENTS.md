@@ -65,7 +65,10 @@ Each rule has a reason. Breaking one is a bug even when the tests pass.
 11. **Analysis must not overstate.** Compare with the user's own baseline (`newMetric`: needs ≥ 14 days for
     z-scores and signals), show group sizes, hide differences below `minFactorNights`, label server-computed
     heuristics as such and never phrase output as a diagnosis.
-12. **Pin tool versions in both places.** golangci-lint and govulncheck versions live in the `Makefile` and
+12. **Keep code small and plain.** golangci-lint enforces `funlen` (80 lines / 40 statements), `gocognit` (25)
+    and `unparam` outside tests. Split a handler into named steps instead of raising a limit; run parallel
+    fetches through `fetchAll`; delete code the moment nothing calls it (`go run golang.org/x/tools/cmd/deadcode@latest -test ./...`).
+13. **Pin tool versions in both places.** golangci-lint and govulncheck versions live in the `Makefile` and
     `.github/workflows/ci.yml`; CI fails if they differ. Actions are pinned by commit SHA with the tag in a comment.
 
 ## Garmin API facts (verified live, Nov 2026)

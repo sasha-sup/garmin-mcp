@@ -4,6 +4,9 @@ linters:
   default: standard # errcheck, govet, ineffassign, staticcheck, unused
   enable:
     - bodyclose
+    - funlen
+    - gocognit
+    - unparam
     - errorlint
     - gosec
     - misspell
@@ -13,6 +16,11 @@ linters:
     - unconvert
     - usestdlibvars
   settings:
+    funlen:
+      lines: 80
+      statements: 40
+    gocognit:
+      min-complexity: 25
     gosec:
       excludes:
         - G104 # unhandled errors: covered by errcheck with its own exclusions
@@ -21,7 +29,7 @@ linters:
       - std-error-handling
     rules:
       - path: _test\.go
-        linters: [gosec, noctx]
+        linters: [gosec, noctx, funlen, gocognit]
 
 formatters:
   enable:
