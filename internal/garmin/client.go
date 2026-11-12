@@ -63,11 +63,7 @@ func (e *APIError) Error() string {
 	case http.StatusTooManyRequests:
 		hint = " (rate limited: wait and retry)"
 	}
-	method := e.Method
-	if method == "" {
-		method = http.MethodGet
-	}
-	msg := fmt.Sprintf("garmin: %s %s: HTTP %d%s", method, e.Path, e.Status, hint)
+	msg := fmt.Sprintf("garmin: %s %s: HTTP %d%s", e.Method, e.Path, e.Status, hint)
 	if e.Body != "" && e.Body != "{}" {
 		msg += ": " + e.Body
 	}
@@ -104,23 +100,11 @@ type Option func(*Client)
 // WithBaseURL overrides the API host. Intended for tests.
 func WithBaseURL(u string) Option { return func(c *Client) { c.baseURL = strings.TrimRight(u, "/") } }
 
-// WithHTTPClient replaces the HTTP client. Its CheckRedirect is overridden.
-func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h } }
-
 // WithLogger sets the logger.
 func WithLogger(l *slog.Logger) Option { return func(c *Client) { c.log = l } }
 
 // WithUserAgent sets the User-Agent header.
 func WithUserAgent(ua string) Option { return func(c *Client) { c.ua = ua } }
-
-// WithMaxConcurrency limits parallel requests to Garmin.
-func WithMaxConcurrency(n int) Option {
-	return func(c *Client) {
-		if n > 0 {
-			c.sem = make(chan struct{}, n)
-		}
-	}
-}
 
 // New returns a client for apiKey.
 func New(apiKey string, opts ...Option) (*Client, error) {
@@ -134,20 +118,20 @@ func New(apiKey string, opts ...Option) (*Client, error) {
 	c := &Client{
 		baseURL: BaseURLGlobal,
 		apiKey:  apiKey,
-		http:    &http.Client{Timeout: 30 * time.Second},
-		log:     slog.New(slog.DiscardHandler),
-		ua:      "garmin-mcp",
-		sem:     make(chan struct{}, 4),
-		now:     time.Now,
+		http: &http.Client{
+			Timeout: 30 * time.Second,
+			// Garmin never redirects these endpoints. Refusing redirects
+			// guarantees the key and token only go to the configured host.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+		log: slog.New(slog.DiscardHandler),
+		ua:  "garmin-mcp",
+		sem: make(chan struct{}, 4),
+		now: time.Now,
 	}
 	for _, o := range opts {
 		o(c)
 	}
-	// Garmin never redirects these endpoints. Refusing redirects guarantees
-	// the key and token are only ever sent to the configured host.
-	h := *c.http
-	h.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	c.http = &h
 	return c, nil
 }
 
@@ -168,41 +152,49 @@ func (c *Client) Get(ctx context.Context, path string, query url.Values) ([]byte
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
+	var body []byte
 	reauthed := false
-	for attempt := 0; ; attempt++ {
+	err := retry(ctx, func() (bool, string, error) {
 		tok, err := c.bearer(ctx, false)
 		if err != nil {
-			return nil, err
+			return false, "", err
 		}
-		status, body, header, err := c.do(ctx, http.MethodGet, u, "Bearer "+tok, "application/json")
+		status, b, header, err := c.do(ctx, http.MethodGet, u, "Bearer "+tok, "application/json")
 		if err != nil {
-			if ctx.Err() != nil || attempt >= maxRetries {
-				return nil, err
-			}
-			c.log.Debug("garmin request failed, retrying", "path", path, "attempt", attempt+1, "err", err)
-			if err := sleep(ctx, backoff(attempt, "")); err != nil {
-				return nil, err
-			}
-			continue
+			return true, "", err
 		}
+		apiErr := &APIError{Method: http.MethodGet, Status: status, Path: path, Body: truncate(string(b), 300)}
 		switch {
 		case status == http.StatusOK:
-			return body, nil
+			body = b
+			return false, "", nil
 		case status == http.StatusNoContent:
-			return nil, ErrNoData
+			return false, "", ErrNoData
 		case status == http.StatusUnauthorized && !reauthed:
-			// The token may have been revoked early; get a new one once.
+			// The token may have been revoked early: get a new one once, right away.
 			reauthed = true
 			c.invalidate(tok)
-			continue
-		case (status == http.StatusTooManyRequests || status >= 500) && attempt < maxRetries:
-			c.log.Debug("garmin transient error, retrying", "path", path, "status", status, "attempt", attempt+1)
-			if err := sleep(ctx, backoff(attempt, header.Get("Retry-After"))); err != nil {
-				return nil, err
-			}
-			continue
+			return true, "0", apiErr
+		case status == http.StatusTooManyRequests || status >= 500:
+			return true, header.Get("Retry-After"), apiErr
 		}
-		return nil, &APIError{Status: status, Path: path, Body: truncate(string(body), 300)}
+		return false, "", apiErr
+	})
+	return body, err
+}
+
+// retry calls attempt until it succeeds, fails permanently, the context ends
+// or maxRetries transient failures happened. attempt reports whether its
+// failure is transient and an optional Retry-After value.
+func retry(ctx context.Context, attempt func() (transient bool, retryAfter string, err error)) error {
+	for n := 0; ; n++ {
+		transient, retryAfter, err := attempt()
+		if err == nil || !transient || n >= maxRetries || ctx.Err() != nil {
+			return err
+		}
+		if err := sleep(ctx, backoff(n, retryAfter)); err != nil {
+			return err
+		}
 	}
 }
 
@@ -297,46 +289,37 @@ func (c *Client) invalidate(tok string) {
 }
 
 func (c *Client) fetchToken(ctx context.Context) (string, time.Time, error) {
-	var (
-		lastErr    error
-		retryAfter string
-	)
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			if err := sleep(ctx, backoff(attempt-1, retryAfter)); err != nil {
-				return "", time.Time{}, err
-			}
-		}
+	var body []byte
+	err := retry(ctx, func() (bool, string, error) {
 		// The token endpoint answers text/plain and rejects Accept: application/json with 406.
-		status, body, header, err := c.do(ctx, http.MethodPost, c.baseURL+tokenPath, "ApiKey "+c.apiKey, "text/plain, */*")
+		status, b, header, err := c.do(ctx, http.MethodPost, c.baseURL+tokenPath, "ApiKey "+c.apiKey, "text/plain, */*")
 		if err != nil {
-			if ctx.Err() != nil {
-				return "", time.Time{}, err
-			}
-			lastErr, retryAfter = err, ""
-			continue
+			return true, "", err
 		}
-		if status == http.StatusTooManyRequests || status >= 500 {
-			retryAfter = header.Get("Retry-After")
-			lastErr = &APIError{Method: http.MethodPost, Status: status, Path: tokenPath}
-			continue
+		// Never echo the body: it is unknown content from an auth endpoint.
+		apiErr := &APIError{Method: http.MethodPost, Status: status, Path: tokenPath}
+		switch {
+		case status == http.StatusOK:
+			body = b
+			return false, "", nil
+		case status == http.StatusTooManyRequests || status >= 500:
+			return true, header.Get("Retry-After"), apiErr
 		}
-		if status != http.StatusOK {
-			// Never echo the body: it is unknown content from an auth endpoint.
-			return "", time.Time{}, &APIError{Method: http.MethodPost, Status: status, Path: tokenPath}
-		}
-		if len(body) > maxTokenBytes {
-			return "", time.Time{}, errors.New("garmin: token response too large")
-		}
-		tok := strings.TrimSpace(string(body))
-		exp, err := jwtExpiry(tok)
-		if err != nil {
-			return "", time.Time{}, fmt.Errorf("garmin: unexpected token format: %w", err)
-		}
-		c.log.Debug("garmin access token obtained", "expires", exp)
-		return tok, exp, nil
+		return false, "", apiErr
+	})
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("garmin: obtain access token: %w", err)
 	}
-	return "", time.Time{}, fmt.Errorf("garmin: obtain access token: %w", lastErr)
+	if len(body) > maxTokenBytes {
+		return "", time.Time{}, errors.New("garmin: token response too large")
+	}
+	tok := strings.TrimSpace(string(body))
+	exp, err := jwtExpiry(tok)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("garmin: unexpected token format: %w", err)
+	}
+	c.log.Debug("garmin access token obtained", "expires", exp)
+	return tok, exp, nil
 }
 
 // jwtExpiry reads the exp claim without verifying the signature. The token is

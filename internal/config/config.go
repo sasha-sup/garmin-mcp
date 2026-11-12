@@ -4,6 +4,7 @@ package config
 
 import (
 	"bufio"
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -39,58 +40,81 @@ type Config struct {
 // Load builds a Config from the process environment.
 func Load() (Config, error) {
 	cfg := Config{Region: "global", Location: time.Local, LogLevel: slog.LevelInfo}
-
-	cfg.APIKey = strings.TrimSpace(os.Getenv(EnvAPIKey))
-	if cfg.APIKey == "" {
-		cfg.APIKey = strings.TrimSpace(os.Getenv(EnvAPIKeyAlias))
+	for _, load := range []func(*Config) error{loadAPIKey, loadRegion, loadCacheDir, loadLocation, loadSensitive, loadLogLevel} {
+		if err := load(&cfg); err != nil {
+			return Config{}, err
+		}
 	}
+	return cfg, nil
+}
+
+func env(name string) string { return strings.TrimSpace(os.Getenv(name)) }
+
+func loadAPIKey(cfg *Config) error {
+	cfg.APIKey = cmp.Or(env(EnvAPIKey), env(EnvAPIKeyAlias))
 	if cfg.APIKey == "" {
-		return Config{}, fmt.Errorf("%s is not set: create a key at https://connect.garmin.com/app/settings/personalApiToken "+
+		return fmt.Errorf("%s is not set: create a key at https://connect.garmin.com/app/settings/personalApiToken "+
 			"and pass it via the environment or -env-file", EnvAPIKey)
 	}
+	return nil
+}
 
-	if r := strings.ToLower(strings.TrimSpace(os.Getenv(EnvRegion))); r != "" {
-		if r != "global" && r != "cn" {
-			return Config{}, fmt.Errorf("%s=%q: want \"global\" or \"cn\"", EnvRegion, r)
-		}
+func loadRegion(cfg *Config) error {
+	switch r := strings.ToLower(env(EnvRegion)); r {
+	case "":
+	case "global", "cn":
 		cfg.Region = r
+	default:
+		return fmt.Errorf("%s=%q: want \"global\" or \"cn\"", EnvRegion, r)
 	}
+	return nil
+}
 
-	switch dir := strings.TrimSpace(os.Getenv(EnvCacheDir)); dir {
+func loadCacheDir(cfg *Config) error {
+	switch dir := env(EnvCacheDir); dir {
 	case "off", "none", "false", "0":
 		cfg.CacheDir = ""
 	case "":
 		base, err := os.UserCacheDir()
 		if err != nil {
-			return Config{}, fmt.Errorf("find user cache dir (set %s to a path or \"off\"): %w", EnvCacheDir, err)
+			return fmt.Errorf("find user cache dir (set %s to a path or \"off\"): %w", EnvCacheDir, err)
 		}
 		cfg.CacheDir = filepath.Join(base, "garmin-mcp")
 	default:
 		cfg.CacheDir = dir
 	}
+	return nil
+}
 
-	if tz := strings.TrimSpace(os.Getenv(EnvTimeZone)); tz != "" {
-		loc, err := time.LoadLocation(tz)
-		if err != nil {
-			return Config{}, fmt.Errorf("%s=%q: want an IANA zone such as Europe/Berlin: %w", EnvTimeZone, tz, err)
-		}
-		cfg.Location = loc
+func loadLocation(cfg *Config) error {
+	tz := env(EnvTimeZone)
+	if tz == "" {
+		return nil
 	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return fmt.Errorf("%s=%q: want an IANA zone such as Europe/Berlin: %w", EnvTimeZone, tz, err)
+	}
+	cfg.Location = loc
+	return nil
+}
 
-	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(EnvSensitive))); v {
+func loadSensitive(cfg *Config) error {
+	switch v := strings.ToLower(env(EnvSensitive)); v {
 	case "", "0", "false", "no":
 	case "1", "true", "yes":
 		cfg.AllowSensitive = true
 	default:
-		return Config{}, fmt.Errorf("%s=%q: want 1 or 0", EnvSensitive, v)
+		return fmt.Errorf("%s=%q: want 1 or 0", EnvSensitive, v)
 	}
+	return nil
+}
 
-	if lvl := strings.TrimSpace(os.Getenv(EnvLogLevel)); lvl != "" {
-		if err := cfg.LogLevel.UnmarshalText([]byte(lvl)); err != nil {
-			return Config{}, fmt.Errorf("%s=%q: want debug, info, warn or error", EnvLogLevel, lvl)
-		}
+func loadLogLevel(cfg *Config) error {
+	if lvl := env(EnvLogLevel); lvl != "" && cfg.LogLevel.UnmarshalText([]byte(lvl)) != nil {
+		return fmt.Errorf("%s=%q: want debug, info, warn or error", EnvLogLevel, lvl)
 	}
-	return cfg, nil
+	return nil
 }
 
 // LoadEnvFile reads GARMIN_* KEY=VALUE lines from path into the process

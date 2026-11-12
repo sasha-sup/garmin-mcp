@@ -110,12 +110,9 @@ var (
 		return splitByDate(resp, "date")
 	}}
 	kindHeartRate = dailyKind{name: "heartrate", maxSpan: 1, fetch: func(ctx context.Context, c *Client, from, _ civil.Date) (map[string]json.RawMessage, error) {
-		body, err := c.Get(ctx, "/wellness-service/wellness/dailyHeartRate", url.Values{"date": {from.String()}})
-		if err != nil {
+		var body json.RawMessage
+		if err := getJSON(ctx, c, "/wellness-service/wellness/dailyHeartRate", url.Values{"date": {from.String()}}, &body); err != nil {
 			return nil, err
-		}
-		if !json.Valid(body) {
-			return nil, fmt.Errorf("garmin: invalid JSON from dailyHeartRate")
 		}
 		return map[string]json.RawMessage{from.String(): body}, nil
 	}}
@@ -225,7 +222,7 @@ func (s *Service) Activities(ctx context.Context, from, to civil.Date, activityT
 func (s *Service) Activity(ctx context.Context, id int64) (*ActivityDetail, error) {
 	var out ActivityDetail
 	path := "/activity-service/activity/" + strconv.FormatInt(id, 10)
-	if err := s.cachedGet(ctx, "activity/"+strconv.FormatInt(id, 10), activityTTL, path, nil, &out); err != nil {
+	if err := s.cachedGet(ctx, "activity/"+strconv.FormatInt(id, 10), activityTTL, path, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -234,7 +231,7 @@ func (s *Service) Activity(ctx context.Context, id int64) (*ActivityDetail, erro
 // Profile returns the user's profile settings.
 func (s *Service) Profile(ctx context.Context) (*ProfileSettings, error) {
 	var out ProfileSettings
-	if err := s.cachedGet(ctx, "meta/profile", metaTTL, "/userprofile-service/userprofile/settings", nil, &out); err != nil {
+	if err := s.cachedGet(ctx, "meta/profile", metaTTL, "/userprofile-service/userprofile/settings", &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -243,7 +240,7 @@ func (s *Service) Profile(ctx context.Context) (*ProfileSettings, error) {
 // HeartRateZones returns configured heart rate zones per sport.
 func (s *Service) HeartRateZones(ctx context.Context) ([]HeartRateZones, error) {
 	var out []HeartRateZones
-	if err := s.cachedGet(ctx, "meta/hrzones", metaTTL, "/biometric-service/heartRateZones/v2", nil, &out); err != nil {
+	if err := s.cachedGet(ctx, "meta/hrzones", metaTTL, "/biometric-service/heartRateZones/v2", &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -252,7 +249,7 @@ func (s *Service) HeartRateZones(ctx context.Context) ([]HeartRateZones, error) 
 // FitnessAge returns the latest Fitness Age as of day.
 func (s *Service) FitnessAge(ctx context.Context, day civil.Date) (*FitnessAge, error) {
 	var out FitnessAge
-	err := s.cachedGet(ctx, "meta/fitnessage-"+day.String(), metaTTL, "/fitnessage-service/fitnessage/v2/"+day.String(), nil, &out)
+	err := s.cachedGet(ctx, "meta/fitnessage-"+day.String(), metaTTL, "/fitnessage-service/fitnessage/v2/"+day.String(), &out)
 	if errors.Is(err, ErrNoData) {
 		return nil, nil
 	}
@@ -263,13 +260,11 @@ func (s *Service) FitnessAge(ctx context.Context, day civil.Date) (*FitnessAge, 
 }
 
 // cachedGet fetches path, caching the raw body under key for ttl.
-func (s *Service) cachedGet(ctx context.Context, key string, ttl time.Duration, path string, q url.Values, v any) error {
-	if data, written, ok := s.cache.Get(key); ok && s.now().Sub(written) < ttl {
-		if err := json.Unmarshal(data, v); err == nil {
-			return nil
-		}
+func (s *Service) cachedGet(ctx context.Context, key string, ttl time.Duration, path string, v any) error {
+	if data, written, ok := s.cache.Get(key); ok && s.now().Sub(written) < ttl && json.Unmarshal(data, v) == nil {
+		return nil
 	}
-	body, err := s.c.Get(ctx, path, q)
+	body, err := getBody(ctx, s.c, path, nil)
 	if err != nil {
 		return err
 	}
@@ -308,58 +303,62 @@ func daily[T any](ctx context.Context, s *Service, k dailyKind, from, to civil.D
 	if today := s.Today(); to.After(today) {
 		to = today // the future has no data; don't cache "nothing" for it
 	}
-	days := civil.Range(from, to)
-	raw := make(map[string]json.RawMessage, len(days))
+	raw := make(map[string]json.RawMessage)
 	var missing []civil.Date
-	for _, d := range days {
+	for _, d := range civil.Range(from, to) {
 		if data, written, ok := s.cache.Get(k.name + "/" + d.String()); ok && s.fresh(d, written, isNull(data)) {
 			raw[d.String()] = data
-			continue
+		} else {
+			missing = append(missing, d)
 		}
-		missing = append(missing, d)
 	}
+	if err := s.fetchDays(ctx, k, missing, raw); err != nil {
+		return nil, err
+	}
+	return decodeDays[T](k.name, raw)
+}
 
-	if len(missing) > 0 {
-		// Stop sibling requests as soon as one chunk fails.
-		ctx, cancel := context.WithCancel(ctx)
-		defer cancel()
-		chunks := chunk(missing, k.maxSpan)
-		var (
-			mu   sync.Mutex
-			wg   sync.WaitGroup
-			errs []error
-		)
-		for _, ch := range chunks {
-			wg.Go(func() {
-				got, err := k.fetch(ctx, s.c, ch[0], ch[len(ch)-1])
-				if errors.Is(err, ErrNoData) {
-					got, err = map[string]json.RawMessage{}, nil
-				}
-				if err != nil {
-					mu.Lock()
-					errs = append(errs, err)
-					mu.Unlock()
+// fetchDays requests the missing days in parallel chunks, stores every day
+// (nullJSON for days without data) in raw and in the cache. The first error
+// cancels the remaining requests and is returned.
+func (s *Service) fetchDays(ctx context.Context, k dailyKind, missing []civil.Date, raw map[string]json.RawMessage) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		mu       sync.Mutex
+		wg       sync.WaitGroup
+		firstErr error
+	)
+	for _, ch := range chunk(missing, k.maxSpan) {
+		wg.Go(func() {
+			got, err := k.fetch(ctx, s.c, ch[0], ch[len(ch)-1])
+			if errors.Is(err, ErrNoData) {
+				err = nil
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
 					cancel()
-					return
 				}
-				mu.Lock()
-				defer mu.Unlock()
-				for _, d := range ch {
-					data, ok := got[d.String()]
-					if !ok {
-						data = nullJSON
-					}
-					raw[d.String()] = data
-					s.putCache(k.name+"/"+d.String(), data)
+				return
+			}
+			for _, d := range ch {
+				data, ok := got[d.String()]
+				if !ok {
+					data = nullJSON
 				}
-			})
-		}
-		wg.Wait()
-		if len(errs) > 0 {
-			return nil, errs[0] // the first failure; later ones are usually cancellations it caused
-		}
+				raw[d.String()] = data
+				s.putCache(k.name+"/"+d.String(), data)
+			}
+		})
 	}
+	wg.Wait()
+	return firstErr
+}
 
+func decodeDays[T any](kind string, raw map[string]json.RawMessage) (map[string]T, error) {
 	out := make(map[string]T, len(raw))
 	for day, data := range raw {
 		if isNull(data) {
@@ -367,7 +366,7 @@ func daily[T any](ctx context.Context, s *Service, k dailyKind, from, to civil.D
 		}
 		var v T
 		if err := json.Unmarshal(data, &v); err != nil {
-			return nil, fmt.Errorf("garmin: decode %s for %s: %w", k.name, day, err)
+			return nil, fmt.Errorf("garmin: decode %s for %s: %w", kind, day, err)
 		}
 		out[day] = v
 	}
@@ -395,13 +394,19 @@ func rangeQuery(from, to civil.Date) url.Values {
 	return url.Values{"startDate": {from.String()}, "endDate": {to.String()}}
 }
 
-func getJSON(ctx context.Context, c *Client, path string, q url.Values, v any) error {
+// getBody performs a GET and treats an empty 200 body like 204 (ErrNoData).
+func getBody(ctx context.Context, c *Client, path string, q url.Values) ([]byte, error) {
 	body, err := c.Get(ctx, path, q)
+	if err == nil && len(bytes.TrimSpace(body)) == 0 {
+		err = ErrNoData
+	}
+	return body, err
+}
+
+func getJSON(ctx context.Context, c *Client, path string, q url.Values, v any) error {
+	body, err := getBody(ctx, c, path, q)
 	if err != nil {
 		return err
-	}
-	if len(bytes.TrimSpace(body)) == 0 {
-		return ErrNoData
 	}
 	if err := json.Unmarshal(body, v); err != nil {
 		return fmt.Errorf("garmin: decode %s: %w", path, err)

@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// Layout is the wire format used by Garmin and by the MCP tools.
-const Layout = "2006-01-02"
+// layout is the wire format used by Garmin and by the MCP tools.
+const layout = "2006-01-02"
 
 // Date is a calendar date. The zero value is not a valid date.
 type Date struct {
@@ -19,7 +19,7 @@ type Date struct {
 
 // Parse parses a YYYY-MM-DD string.
 func Parse(s string) (Date, error) {
-	t, err := time.Parse(Layout, s)
+	t, err := time.Parse(layout, s)
 	if err != nil {
 		return Date{}, fmt.Errorf("invalid date %q: want YYYY-MM-DD", s)
 	}
@@ -37,11 +37,8 @@ func Today(now time.Time, loc *time.Location) Date {
 	return Of(now.In(loc))
 }
 
-// IsZero reports whether d is the zero value.
-func (d Date) IsZero() bool { return d.t.IsZero() }
-
 // String formats d as YYYY-MM-DD.
-func (d Date) String() string { return d.t.Format(Layout) }
+func (d Date) String() string { return d.t.Format(layout) }
 
 // AddDays returns d shifted by n days.
 func (d Date) AddDays(n int) Date { return Date{t: d.t.AddDate(0, 0, n)} }

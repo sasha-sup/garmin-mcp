@@ -16,8 +16,8 @@ import (
 
 const testKey = "test-api-key-123"
 
-// FakeJWT returns a syntactically valid unsigned JWT that expires at exp.
-func FakeJWT(exp time.Time) string {
+// fakeJWT returns a syntactically valid unsigned JWT that expires at exp.
+func fakeJWT(exp time.Time) string {
 	enc := base64.RawURLEncoding.EncodeToString
 	return enc([]byte(`{"alg":"none"}`)) + "." + enc(fmt.Appendf(nil, `{"exp":%d}`, exp.Unix())) + ".c2ln"
 }
@@ -45,7 +45,7 @@ func newFake(t *testing.T, h func(w http.ResponseWriter, r *http.Request)) *fake
 				w.WriteHeader(http.StatusNotAcceptable) // mirrors the real API
 				return
 			}
-			tok := FakeJWT(time.Now().Add(f.tokenExp))
+			tok := fakeJWT(time.Now().Add(f.tokenExp))
 			f.lastTokenTo.Store(tok)
 			w.Header().Set("Content-Type", "text/plain")
 			fmt.Fprint(w, tok)
@@ -217,7 +217,7 @@ func TestNewRejectsBadKeys(t *testing.T) {
 
 func TestJWTExpiry(t *testing.T) {
 	exp := time.Unix(1_800_000_000, 0)
-	got, err := jwtExpiry(FakeJWT(exp))
+	got, err := jwtExpiry(fakeJWT(exp))
 	if err != nil || !got.Equal(exp) {
 		t.Fatalf("got %v, %v", got, err)
 	}
@@ -231,7 +231,7 @@ func TestJWTExpiry(t *testing.T) {
 func TestTokenRefreshIsSingleFlight(t *testing.T) {
 	release := make(chan struct{})
 	var tokenCalls atomic.Int32
-	tok := FakeJWT(time.Now().Add(time.Hour))
+	tok := fakeJWT(time.Now().Add(time.Hour))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == tokenPath {
 			tokenCalls.Add(1)

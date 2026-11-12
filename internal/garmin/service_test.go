@@ -28,7 +28,7 @@ func mustDate(t *testing.T, s string) civil.Date {
 
 // sleepFake answers the sleep range endpoint with one item per requested day
 // except days listed in empty, and records each requested range.
-func sleepFake(t *testing.T, empty map[string]bool) (*fake, *[][2]string, *sync.Mutex) {
+func sleepFake(t *testing.T, empty map[string]bool) (*fake, *[][2]string) {
 	var mu sync.Mutex
 	var ranges [][2]string
 	f := newFake(t, func(w http.ResponseWriter, r *http.Request) {
@@ -53,10 +53,11 @@ func sleepFake(t *testing.T, empty map[string]bool) (*fake, *[][2]string, *sync.
 		}
 		fmt.Fprint(w, "["+strings.Join(items, ",")+"]")
 	})
-	return f, &ranges, &mu
+	return f, &ranges
 }
 
-func newTestService(t *testing.T, f *fake, today string, withCache bool) *Service {
+// newTestService pins "today" to 2020-03-01 so test dates are settled.
+func newTestService(t *testing.T, f *fake, withCache bool) *Service {
 	t.Helper()
 	var ch *cache.Cache
 	if withCache {
@@ -66,14 +67,14 @@ func newTestService(t *testing.T, f *fake, today string, withCache bool) *Servic
 		}
 	}
 	s := NewService(newTestClient(t, f), ch, time.UTC, nil)
-	now, _ := time.Parse(time.DateOnly, today)
+	now, _ := time.Parse(time.DateOnly, "2020-03-01")
 	s.now = func() time.Time { return now.Add(12 * time.Hour) }
 	return s
 }
 
 func TestDailyChunksRespectSpanLimit(t *testing.T) {
-	f, ranges, _ := sleepFake(t, nil)
-	s := newTestService(t, f, "2020-03-01", false)
+	f, ranges := sleepFake(t, nil)
+	s := newTestService(t, f, false)
 	m, err := s.Sleep(context.Background(), mustDate(t, "2020-01-01"), mustDate(t, "2020-02-29"))
 	if err != nil {
 		t.Fatal(err)
@@ -87,8 +88,8 @@ func TestDailyChunksRespectSpanLimit(t *testing.T) {
 }
 
 func TestDailyCacheServesSettledDays(t *testing.T) {
-	f, ranges, _ := sleepFake(t, map[string]bool{"2020-01-03": true})
-	s := newTestService(t, f, "2020-03-01", true)
+	f, ranges := sleepFake(t, map[string]bool{"2020-01-03": true})
+	s := newTestService(t, f, true)
 	ctx := context.Background()
 	from, to := mustDate(t, "2020-01-01"), mustDate(t, "2020-01-05")
 	first, err := s.Sleep(ctx, from, to)
@@ -115,8 +116,8 @@ func TestDailyCacheServesSettledDays(t *testing.T) {
 }
 
 func TestDailyRecentDaysExpire(t *testing.T) {
-	f, ranges, _ := sleepFake(t, nil)
-	s := newTestService(t, f, "2020-03-01", true)
+	f, ranges := sleepFake(t, nil)
+	s := newTestService(t, f, true)
 	ctx := context.Background()
 	// Pretend "now" is the real clock so cache mtimes are recent relative to it.
 	s.now = time.Now
@@ -140,8 +141,8 @@ func TestDailyRecentDaysExpire(t *testing.T) {
 }
 
 func TestDailyClampsFuture(t *testing.T) {
-	f, ranges, _ := sleepFake(t, nil)
-	s := newTestService(t, f, "2020-03-01", false)
+	f, ranges := sleepFake(t, nil)
+	s := newTestService(t, f, false)
 	if _, err := s.Sleep(context.Background(), mustDate(t, "2020-02-28"), mustDate(t, "2020-03-10")); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +179,7 @@ func TestActivitiesPaging(t *testing.T) {
 		}
 		fmt.Fprint(w, "["+strings.Join(items, ",")+"]")
 	})
-	s := newTestService(t, f, "2020-03-01", false)
+	s := newTestService(t, f, false)
 	for _, tc := range []struct{ max, want int }{{20, 20}, {150, 150}, {1000, 250}} {
 		got, err := s.Activities(context.Background(), mustDate(t, "2020-01-01"), mustDate(t, "2020-01-31"), "", "", tc.max)
 		if err != nil {

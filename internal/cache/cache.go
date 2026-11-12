@@ -8,6 +8,7 @@ package cache
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -69,8 +70,8 @@ func (c *Cache) Get(key string) (data []byte, written time.Time, ok bool) {
 	if err != nil {
 		return nil, time.Time{}, false
 	}
-	// Refuse symlinks and oversized or special files.
-	if st, err := os.Lstat(p); err != nil || !st.Mode().IsRegular() || st.Size() > maxEntryBytes {
+	// Refuse symlinks and special files; Open below would follow a symlink.
+	if st, err := os.Lstat(p); err != nil || !st.Mode().IsRegular() {
 		return nil, time.Time{}, false
 	}
 	f, err := os.Open(p) //nolint:gosec // p is built from a key validated by keyRE
@@ -79,11 +80,11 @@ func (c *Cache) Get(key string) (data []byte, written time.Time, ok bool) {
 	}
 	defer f.Close()
 	st, err := f.Stat()
-	if err != nil || !st.Mode().IsRegular() || st.Size() > maxEntryBytes {
+	if err != nil {
 		return nil, time.Time{}, false
 	}
-	data = make([]byte, st.Size())
-	if _, err := f.ReadAt(data, 0); err != nil && st.Size() > 0 {
+	data, err = io.ReadAll(io.LimitReader(f, maxEntryBytes+1))
+	if err != nil || len(data) > maxEntryBytes {
 		return nil, time.Time{}, false
 	}
 	return data, st.ModTime(), true

@@ -18,9 +18,8 @@ type DailySummary struct {
 		} `json:"floorsAscended"`
 	} `json:"movement"`
 	Calories struct {
-		BurnedResting *float64 `json:"burnedResting"`
-		BurnedActive  *float64 `json:"burnedActive"`
-		BurnedTotal   *float64 `json:"burnedTotal"`
+		BurnedActive *float64 `json:"burnedActive"`
+		BurnedTotal  *float64 `json:"burnedTotal"`
 	} `json:"calories"`
 	HeartRate struct {
 		MinValue     *int `json:"minValue"`
@@ -33,27 +32,17 @@ type DailySummary struct {
 		Vigorous *int `json:"vigorous"`
 	} `json:"intensityMinutes"`
 	Stress struct {
-		AvgLevel                   *int     `json:"avgLevel"`
-		MaxLevel                   *int     `json:"maxLevel"`
-		Qualifier                  string   `json:"qualifier"`
-		RestDurationInMillis       *int64   `json:"restDurationInMillis"`
-		LowStressDurationInMillis  *int64   `json:"lowStressDurationInMillis"`
-		MedStressDurationInMillis  *int64   `json:"mediumStressDurationInMillis"`
-		HighStressDurationInMillis *int64   `json:"highStressDurationInMillis"`
-		HighStressProportion       *float64 `json:"highStressProportion"`
+		AvgLevel                   *int   `json:"avgLevel"`
+		MaxLevel                   *int   `json:"maxLevel"`
+		Qualifier                  string `json:"qualifier"`
+		RestDurationInMillis       *int64 `json:"restDurationInMillis"`
+		HighStressDurationInMillis *int64 `json:"highStressDurationInMillis"`
 	} `json:"stress"`
 	BodyBattery struct {
-		MinValue       *int `json:"minValue"`
-		MaxValue       *int `json:"maxValue"`
-		ChargedValue   *int `json:"chargedValue"`
-		DrainedValue   *int `json:"drainedValue"`
-		LatestValue    *int `json:"latestValue"`
-		ActivityEvents []struct {
-			EventType           string `json:"eventType"`
-			EventStartTimeLocal string `json:"eventStartTimeLocal"`
-			BodyBatteryImpact   *int   `json:"bodyBatteryImpact"`
-			DurationInMillis    *int64 `json:"durationInMillis"`
-		} `json:"activityEvents"`
+		MinValue     *int `json:"minValue"`
+		MaxValue     *int `json:"maxValue"`
+		ChargedValue *int `json:"chargedValue"`
+		DrainedValue *int `json:"drainedValue"`
 	} `json:"bodyBattery"`
 	Respiration struct {
 		AvgValue *float64 `json:"avgValue"`
@@ -107,19 +96,15 @@ type HRVSummary struct {
 	LastNightAvg      *int   `json:"lastNightAvg"`
 	LastNight5MinHigh *int   `json:"lastNight5MinHigh"`
 	Baseline          *struct {
-		LowUpper      *int `json:"lowUpper"`
 		BalancedLow   *int `json:"balancedLow"`
 		BalancedUpper *int `json:"balancedUpper"`
 	} `json:"baseline"`
-	Status         string `json:"status"`
-	FeedbackPhrase string `json:"feedbackPhrase"`
+	Status string `json:"status"`
 }
 
 // BodyBatteryFeedback is Garmin's textual Body Battery assessment.
 type BodyBatteryFeedback struct {
-	EventTimestampGmt string `json:"eventTimestampGmt"`
-	BodyBatteryLevel  string `json:"bodyBatteryLevel"`
-	FeedbackLongType  string `json:"feedbackLongType"`
+	FeedbackLongType string `json:"feedbackLongType"`
 }
 
 // BodyBatteryReport is one item of /wellness-service/wellness/bodyBattery/reports/daily.
@@ -147,8 +132,6 @@ type DailyHeartRate struct {
 	RestingHeartRate    *int         `json:"restingHeartRate"`
 	LastSevenDaysAvgRHR *int         `json:"lastSevenDaysAvgRestingHeartRate"`
 	HeartRateValues     [][]*float64 `json:"heartRateValues"` // [epoch ms GMT, bpm]
-	StartTimestampLocal string       `json:"startTimestampLocal"`
-	StartTimestampGMT   string       `json:"startTimestampGMT"`
 }
 
 // TypeRef is a Garmin enum reference such as {"typeKey":"running"}.
@@ -163,12 +146,10 @@ type Activity struct {
 	StartTimeLocal        string   `json:"startTimeLocal"`
 	ActivityType          TypeRef  `json:"activityType"`
 	EventType             TypeRef  `json:"eventType"`
-	Distance              *float64 `json:"distance"`        // m
-	Duration              *float64 `json:"duration"`        // s
-	MovingDuration        *float64 `json:"movingDuration"`  // s
-	ElapsedDuration       *float64 `json:"elapsedDuration"` // s
-	AverageSpeed          *float64 `json:"averageSpeed"`    // m/s
-	MaxSpeed              *float64 `json:"maxSpeed"`
+	Distance              *float64 `json:"distance"`       // m
+	Duration              *float64 `json:"duration"`       // s
+	MovingDuration        *float64 `json:"movingDuration"` // s
+	AverageSpeed          *float64 `json:"averageSpeed"`   // m/s
 	ElevationGain         *float64 `json:"elevationGain"`
 	Calories              *float64 `json:"calories"`
 	AverageHR             *float64 `json:"averageHR"`
@@ -182,11 +163,8 @@ type Activity struct {
 	ActivityTrainingLoad  *float64 `json:"activityTrainingLoad"`
 	VO2MaxValue           *float64 `json:"vO2MaxValue"`
 	DifferenceBodyBattery *int     `json:"differenceBodyBattery"`
-	ModerateIntensityMins *int     `json:"moderateIntensityMinutes"`
-	VigorousIntensityMins *int     `json:"vigorousIntensityMinutes"`
 	TotalSets             *int     `json:"totalSets"`
 	TotalReps             *int     `json:"totalReps"`
-	LapCount              *int     `json:"lapCount"`
 	HRTimeInZone1         *float64 `json:"hrTimeInZone_1"`
 	HRTimeInZone2         *float64 `json:"hrTimeInZone_2"`
 	HRTimeInZone3         *float64 `json:"hrTimeInZone_3"`
@@ -205,14 +183,6 @@ type ActivityDetail struct {
 	Summary      map[string]any `json:"summaryDTO"`
 }
 
-// WeightRange is /weight-service/weight/range/{start}/{end}.
-type WeightRange struct {
-	Daily []struct {
-		SummaryDate string        `json:"summaryDate"`
-		Latest      *WeightSample `json:"latestWeight"`
-	} `json:"dailyWeightSummaries"`
-}
-
 // WeightSample is one weigh-in. Masses are in grams.
 type WeightSample struct {
 	Weight     *float64 `json:"weight"`
@@ -220,7 +190,6 @@ type WeightSample struct {
 	BodyFat    *float64 `json:"bodyFat"` // %
 	BodyWater  *float64 `json:"bodyWater"`
 	MuscleMass *float64 `json:"muscleMass"`
-	BoneMass   *float64 `json:"boneMass"`
 	SourceType string   `json:"sourceType"`
 }
 
@@ -256,5 +225,4 @@ type FitnessAge struct {
 type ProfileSettings struct {
 	TimeZone          string `json:"timeZone"`
 	MeasurementSystem string `json:"measurementSystem"`
-	PreferredLocale   string `json:"preferredLocale"`
 }

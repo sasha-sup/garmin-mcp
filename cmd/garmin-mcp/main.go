@@ -44,37 +44,65 @@ func run() error {
 		fmt.Println(buildVersion())
 		return nil
 	}
-	if *envFile != "" {
-		warn, err := config.LoadEnvFile(*envFile)
+	cfg, err := loadConfig(*envFile)
+	if err != nil {
+		return err
+	}
+	if *clearCache {
+		return runClearCache(cfg)
+	}
+	// stdout carries the MCP protocol; logs must go to stderr.
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	svc, err := newService(cfg, log)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if *check {
+		return runCheck(ctx, svc, cfg)
+	}
+	return serve(ctx, svc, cfg, log)
+}
+
+func loadConfig(envFile string) (config.Config, error) {
+	if envFile != "" {
+		warn, err := config.LoadEnvFile(envFile)
 		if err != nil {
-			return err
+			return config.Config{}, err
 		}
 		if warn != "" {
 			fmt.Fprintln(os.Stderr, "garmin-mcp: warning:", warn)
 		}
 	}
-	cfg, err := config.Load()
+	return config.Load()
+}
+
+func runClearCache(cfg config.Config) error {
+	if cfg.CacheDir == "" {
+		fmt.Println("cache is disabled (GARMIN_CACHE_DIR=off): nothing to clear")
+		return nil
+	}
+	ch, err := cache.New(cfg.CacheDir)
 	if err != nil {
 		return err
 	}
+	if err := ch.Clear(); err != nil {
+		return err
+	}
+	fmt.Println("cache cleared:", cfg.CacheDir)
+	return nil
+}
 
-	// stdout carries the MCP protocol; logs must go to stderr.
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
-
+func newService(cfg config.Config, log *slog.Logger) (*garmin.Service, error) {
 	var ch *cache.Cache
 	if cfg.CacheDir != "" {
+		var err error
 		if ch, err = cache.New(cfg.CacheDir); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	if *clearCache {
-		if err := ch.Clear(); err != nil {
-			return err
-		}
-		fmt.Println("cache cleared:", cfg.CacheDir)
-		return nil
-	}
-
 	base := garmin.BaseURLGlobal
 	if cfg.Region == "cn" {
 		base = garmin.BaseURLChina
@@ -85,17 +113,12 @@ func run() error {
 		garmin.WithUserAgent("garmin-mcp/"+buildVersion()),
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	svc := garmin.NewService(client, ch, cfg.Location, log)
+	return garmin.NewService(client, ch, cfg.Location, log), nil
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	if *check {
-		return runCheck(ctx, client, svc, cfg)
-	}
-
+func serve(ctx context.Context, svc *garmin.Service, cfg config.Config, log *slog.Logger) error {
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    "garmin-mcp",
 		Title:   "Garmin Connect",
@@ -103,17 +126,17 @@ func run() error {
 	}, &mcp.ServerOptions{Instructions: tools.Instructions, Logger: log})
 	tools.Register(srv, svc, tools.Options{AllowSensitive: cfg.AllowSensitive})
 
-	log.Info("garmin-mcp started", "version", buildVersion(), "cache", ch.Dir(), "tz", cfg.Location.String())
+	log.Info("garmin-mcp started", "version", buildVersion(), "cache", cfg.CacheDir, "tz", cfg.Location.String())
 	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 	return nil
 }
 
-func runCheck(ctx context.Context, client *garmin.Client, svc *garmin.Service, cfg config.Config) error {
+func runCheck(ctx context.Context, svc *garmin.Service, cfg config.Config) error {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	exp, err := client.CheckAuth(ctx)
+	exp, err := svc.Client().CheckAuth(ctx)
 	if err != nil {
 		return err
 	}
