@@ -11,9 +11,11 @@ on:
 permissions:
   contents: read
 
+# Only superseded pull request runs are cancelled; pushes to main and the
+# weekly scan always finish.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Third-party actions are pinned to commit SHAs; Dependabot keeps them current.
 jobs:
@@ -32,12 +34,19 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum || { echo "::error::go.mod/go.sum are not tidy: run 'go mod tidy' and commit the result"; exit 1; }
+      - name: Tool versions match the Makefile
+        run: |
+          lint=$(grep -oE 'golangci-lint@v[0-9.]+' Makefile | cut -d@ -f2)
+          vuln=$(grep -oE 'govulncheck@v[0-9.]+' Makefile | cut -d@ -f2)
+          grep -qE "^ +version: ${lint}( |$)" .github/workflows/ci.yml || { echo "::error::golangci-lint ${lint} from the Makefile differs from the golangci-lint-action version input: update both"; exit 1; }
+          grep -qE "govulncheck@${vuln} " .github/workflows/ci.yml || { echo "::error::govulncheck ${vuln} from the Makefile differs from ci.yml: update both"; exit 1; }
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.15.0 # keep in sync with the Makefile
+          version: v2.15.0 # keep in sync with the Makefile (checked above)
 
   test:
     name: Test (${{ matrix.os }})
+    if: github.event_name != 'schedule' # the weekly run only re-scans for vulnerabilities
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:

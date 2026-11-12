@@ -40,7 +40,7 @@ sleep; Claude turns that into concrete recommendations.
    ```sh
    ./bin/garmin-mcp -env-file .env -check
    # auth ok: access token valid until 2026-11-13 10:33:12
-   # profile ok: Garmin time zone Asia/Dubai, server time zone Asia/Dubai (+04 +04:00)
+   # profile ok: Garmin time zone Europe/Berlin, server time zone Europe/Berlin (CET +01:00)
    # data ok: 7 of the last 7 days have a daily summary
    ```
 
@@ -104,8 +104,8 @@ The Personal API does not expose Training Readiness, Training Status, Acute Load
 | Variable | Purpose | Default |
 |---|---|---|
 | `GARMIN_API_KEY` (or `GARMIN_API`) | Personal API key | — (required) |
-| `GARMIN_TZ` | Your IANA time zone, e.g. `Asia/Tbilisi`. Decides what "today" is. `garmin_profile` warns if it differs from your Garmin profile | system zone |
-| `GARMIN_CACHE_DIR` | Cache directory, or `off` | `~/.cache/garmin-mcp` |
+| `GARMIN_TZ` | Your IANA time zone, e.g. `Europe/Berlin`. Decides what "today" is. `garmin_profile` warns if it differs from your Garmin profile | system zone |
+| `GARMIN_CACHE_DIR` | Cache directory, or `off` | user cache dir: `~/.cache/garmin-mcp` on Linux, `~/Library/Caches/garmin-mcp` on macOS |
 | `GARMIN_REGION` | `global` or `cn` | `global` |
 | `GARMIN_LOG_LEVEL` | `debug`, `info`, `warn`, `error` (logs go to stderr) | `info` |
 | `GARMIN_ALLOW_SENSITIVE` | `1` enables the nutrition and menstrual-cycle endpoints in `garmin_api_get` | off |
@@ -120,8 +120,9 @@ Flags: `-env-file PATH` (the environment wins over the file; the file may only s
   The token lives only in memory and is renewed 5 minutes before expiry, and once on HTTP 401.
   One request performs the renewal; concurrent requests wait for it, but never longer than their own timeout.
 - **Range limits.** Garmin answers `400` when a period is too long: sleep and Body Battery 31 days,
-  stress and steps 28, daily summaries 1 year. The server splits requests into chunks and runs
-  them in parallel (at most 4 at a time).
+  stress and steps 28, daily summaries 1 year. The dedicated tools split requests into chunks and run
+  them in parallel (at most 4 at a time). `garmin_api_get` passes dates through unchanged, so raw
+  `stress_daily`/`steps_daily` requests must stay within 28 days.
 - **Cache.** Responses are stored per day in `GARMIN_CACHE_DIR`. A day with data that was fetched
   more than 72 hours after it ended is final and never requested again; more recent days are cached
   for 10 minutes because the watch keeps syncing. A day **without data** (watch not worn or not

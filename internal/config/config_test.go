@@ -20,7 +20,7 @@ func TestLoadEnvFile(t *testing.T) {
 	t.Setenv(EnvAPIKey, "")
 	os.Unsetenv(EnvAPIKey)
 	t.Setenv("GARMIN_TZ", "Europe/Berlin") // already set: file must not override
-	p := writeFile(t, "# comment\n\nexport GARMIN_API_KEY=\"abc=def\"\nGARMIN_TZ=Asia/Tbilisi\n", 0o600)
+	p := writeFile(t, "# comment\n\nexport GARMIN_API_KEY=\"abc=def\"\nGARMIN_TZ=Europe/Berlin\n", 0o600)
 	warn, err := LoadEnvFile(p)
 	if err != nil {
 		t.Fatal(err)
@@ -35,6 +35,23 @@ func TestLoadEnvFile(t *testing.T) {
 		t.Errorf("existing env was overridden: %q", got)
 	}
 	os.Unsetenv(EnvAPIKey)
+}
+
+func TestParseValue(t *testing.T) {
+	cases := map[string]string{
+		`off          # disable the disk cache`: "off",
+		"Europe/Berlin\t# zone":                 "Europe/Berlin",
+		`"a # b"  # comment`:                    "a # b",
+		`'x'`:                                   "x",
+		`abc#def`:                               "abc#def",
+		`plain`:                                 "plain",
+		``:                                      "",
+	}
+	for in, want := range cases {
+		if got := parseValue(in); got != want {
+			t.Errorf("parseValue(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
 
 func TestLoadEnvFileWarnsOnLoosePermissions(t *testing.T) {
@@ -68,14 +85,14 @@ func TestLoad(t *testing.T) {
 	t.Setenv(EnvAPIKey, "")
 	t.Setenv(EnvAPIKeyAlias, "alias-key")
 	t.Setenv(EnvCacheDir, "off")
-	t.Setenv(EnvTimeZone, "Asia/Tbilisi")
+	t.Setenv(EnvTimeZone, "Europe/Berlin")
 	t.Setenv(EnvRegion, "")
 	t.Setenv(EnvLogLevel, "debug")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.APIKey != "alias-key" || cfg.CacheDir != "" || cfg.Location.String() != "Asia/Tbilisi" || cfg.Region != "global" {
+	if cfg.APIKey != "alias-key" || cfg.CacheDir != "" || cfg.Location.String() != "Europe/Berlin" || cfg.Region != "global" {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }

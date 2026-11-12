@@ -72,7 +72,7 @@ func Load() (Config, error) {
 	if tz := strings.TrimSpace(os.Getenv(EnvTimeZone)); tz != "" {
 		loc, err := time.LoadLocation(tz)
 		if err != nil {
-			return Config{}, fmt.Errorf("%s=%q: want an IANA zone such as Asia/Tbilisi: %w", EnvTimeZone, tz, err)
+			return Config{}, fmt.Errorf("%s=%q: want an IANA zone such as Europe/Berlin: %w", EnvTimeZone, tz, err)
 		}
 		cfg.Location = loc
 	}
@@ -128,7 +128,7 @@ func LoadEnvFile(path string) (warning string, err error) {
 		if !strings.HasPrefix(key, "GARMIN_") {
 			return warning, fmt.Errorf("%s:%d: only GARMIN_* variables are allowed in the env file, got %q; set others in the shell", path, n, key)
 		}
-		val = unquote(strings.TrimSpace(val))
+		val = parseValue(strings.TrimSpace(val))
 		if _, set := os.LookupEnv(key); set {
 			continue
 		}
@@ -142,9 +142,19 @@ func LoadEnvFile(path string) (warning string, err error) {
 	return warning, nil
 }
 
-func unquote(v string) string {
-	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
-		return v[1 : len(v)-1]
+// parseValue unquotes a value and drops a trailing " # comment". Inside
+// quotes everything is kept literally.
+func parseValue(v string) string {
+	if len(v) >= 1 && (v[0] == '"' || v[0] == '\'') {
+		if end := strings.IndexByte(v[1:], v[0]); end >= 0 {
+			return v[1 : end+1]
+		}
+		return v
 	}
-	return v
+	if i := strings.Index(v, " #"); i >= 0 {
+		v = v[:i]
+	} else if i := strings.Index(v, "\t#"); i >= 0 {
+		v = v[:i]
+	}
+	return strings.TrimSpace(v)
 }
