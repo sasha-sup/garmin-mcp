@@ -19,7 +19,7 @@ func TestPutGetAndPermissions(t *testing.T) {
 	if !ok || string(data) != `{"a":1}` {
 		t.Fatalf("Get = %q, %v", data, ok)
 	}
-	for _, p := range []string{dir, filepath.Join(dir, version), filepath.Join(dir, version, "sleep")} {
+	for _, p := range []string{filepath.Join(dir, version), filepath.Join(dir, version, "sleep")} {
 		st, err := os.Stat(p)
 		if err != nil {
 			t.Fatal(err)
@@ -37,17 +37,43 @@ func TestPutGetAndPermissions(t *testing.T) {
 	}
 }
 
-func TestNewTightensExistingDir(t *testing.T) {
+func TestNewLeavesParentModeAlone(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, version), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := New(dir); err != nil {
 		t.Fatal(err)
 	}
-	st, _ := os.Stat(dir)
-	if st.Mode().Perm() != 0o700 {
-		t.Fatalf("mode = %v, want 0700", st.Mode().Perm())
+	if st, _ := os.Stat(dir); st.Mode().Perm() != 0o755 {
+		t.Errorf("parent mode changed to %v", st.Mode().Perm())
+	}
+	if st, _ := os.Stat(filepath.Join(dir, version)); st.Mode().Perm() != 0o700 {
+		t.Errorf("own dir mode = %v, want 0700", st.Mode().Perm())
+	}
+}
+
+func TestGetRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	c, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(dir, "secret")
+	if err := os.WriteFile(secret, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(c.Dir(), "a"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(c.Dir(), "a", "b.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := c.Get("a/b"); ok {
+		t.Fatal("Get followed a symlink")
 	}
 }
 

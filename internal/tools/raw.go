@@ -21,8 +21,9 @@ const rawLimit = 100 << 10
 // rawEndpoint is one allow-listed GET endpoint. Path parameters are filled
 // only from validated values, so the tool cannot reach arbitrary URLs.
 type rawEndpoint struct {
-	path  string   // with {date}, {start}, {end}, {id}
-	query []string // query keys passed through from the input
+	path      string   // with {date}, {start}, {end}, {id}
+	query     []string // query keys passed through from the input
+	sensitive bool     // reproductive health and nutrition: only with Options.AllowSensitive
 }
 
 var rawEndpoints = map[string]rawEndpoint{
@@ -49,16 +50,19 @@ var rawEndpoints = map[string]rawEndpoint{
 	"weight_all":              {path: "/weight-service/weight/all/{start}/{end}"},
 	"weight_range":            {path: "/weight-service/weight/range/{start}/{end}", query: []string{"includeAll"}},
 	"weight_goal":             {path: "/goal-service/goal/user/effective/weightgoal/{start}/{end}"},
-	"nutrition_day":           {path: "/nutrition-service/food/logs/{date}", query: []string{"includeGoals", "includeNutrition", "mealId"}},
-	"menstrual_cycle_summary": {path: "/periodichealth-service/menstrualcycle/summary/{date}"},
-	"menstrual_cycle_day":     {path: "/periodichealth-service/menstrualcycle/dayview/{date}", query: []string{"todayDate", "reducedResponse", "includeAnalysis"}},
+	"nutrition_day":           {path: "/nutrition-service/food/logs/{date}", query: []string{"includeGoals", "includeNutrition", "mealId"}, sensitive: true},
+	"menstrual_cycle_summary": {path: "/periodichealth-service/menstrualcycle/summary/{date}", sensitive: true},
+	"menstrual_cycle_day":     {path: "/periodichealth-service/menstrualcycle/dayview/{date}", query: []string{"todayDate", "reducedResponse", "includeAnalysis"}, sensitive: true},
 	"profile_settings":        {path: "/userprofile-service/userprofile/settings"},
 }
 
-// RawEndpointNames lists the allowed endpoint names, sorted.
-func RawEndpointNames() []string {
+// RawEndpointNames lists the endpoint names enabled for the given options, sorted.
+func RawEndpointNames(allowSensitive bool) []string {
 	names := make([]string, 0, len(rawEndpoints))
-	for k := range rawEndpoints {
+	for k, ep := range rawEndpoints {
+		if ep.sensitive && !allowSensitive {
+			continue
+		}
 		names = append(names, k)
 	}
 	slices.Sort(names)
@@ -80,7 +84,10 @@ var queryValueRE = regexp.MustCompile(`^[\p{L}\p{N} _.:,-]{0,100}$`)
 func (h *handlers) apiGet(ctx context.Context, _ *mcp.CallToolRequest, in RawInput) (*mcp.CallToolResult, any, error) {
 	ep, ok := rawEndpoints[in.Endpoint]
 	if !ok {
-		return nil, nil, fmt.Errorf("unknown endpoint %q; allowed: %s", in.Endpoint, strings.Join(RawEndpointNames(), ", "))
+		return nil, nil, fmt.Errorf("unknown endpoint %q; allowed: %s", in.Endpoint, strings.Join(RawEndpointNames(h.opts.AllowSensitive), ", "))
+	}
+	if ep.sensitive && !h.opts.AllowSensitive {
+		return nil, nil, fmt.Errorf("endpoint %s returns reproductive-health or nutrition data and is disabled; the user can enable it with GARMIN_ALLOW_SENSITIVE=1", in.Endpoint)
 	}
 	path := ep.path
 	fill := func(placeholder, value, name string) error {

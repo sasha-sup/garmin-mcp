@@ -101,7 +101,7 @@ func run() error {
 		Title:   "Garmin Connect",
 		Version: buildVersion(),
 	}, &mcp.ServerOptions{Instructions: tools.Instructions, Logger: log})
-	tools.Register(srv, svc)
+	tools.Register(srv, svc, tools.Options{AllowSensitive: cfg.AllowSensitive})
 
 	log.Info("garmin-mcp started", "version", buildVersion(), "cache", ch.Dir(), "tz", cfg.Location.String())
 	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {

@@ -35,6 +35,8 @@ const (
 	maxTokenBytes = 16 << 10
 	refreshMargin = 5 * time.Minute
 	maxRetries    = 3
+
+	tokenRefreshTimeout = 2 * time.Minute
 )
 
 // ErrNoData means Garmin answered 204 No Content: nothing recorded for the
@@ -82,9 +84,11 @@ type Client struct {
 	sem     chan struct{}
 	now     func() time.Time
 
-	mu       sync.Mutex
-	token    string
-	tokenExp time.Time
+	mu         sync.Mutex
+	token      string
+	tokenExp   time.Time
+	refreshing chan struct{} // non-nil while a token refresh is in flight; closed when done
+	refreshErr error         // result of the last finished refresh
 }
 
 // Option configures a Client.
@@ -231,18 +235,55 @@ func (c *Client) do(ctx context.Context, method, u, auth, accept string) (int, [
 }
 
 // bearer returns a valid access token, fetching a new one when needed.
+//
+// Only one refresh runs at a time (single flight). The refresh itself is not
+// tied to any caller's context, so a caller giving up does not fail the
+// refresh for the others; every caller still returns as soon as its own
+// context is done. The mutex is never held during network I/O.
 func (c *Client) bearer(ctx context.Context, force bool) (string, error) {
 	c.mu.Lock()
+	if !force && c.validLocked() {
+		tok := c.token
+		c.mu.Unlock()
+		return tok, nil
+	}
+	ch := c.refreshing
+	if ch == nil {
+		ch = make(chan struct{})
+		c.refreshing = ch
+		go c.refresh(ch) //nolint:gosec // detached on purpose: one caller giving up must not fail the shared refresh
+	}
+	c.mu.Unlock()
+
+	select {
+	case <-ch:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !force && c.token != "" && c.now().Add(refreshMargin).Before(c.tokenExp) {
-		return c.token, nil
+	if c.refreshErr != nil {
+		return "", c.refreshErr
 	}
+	return c.token, nil
+}
+
+func (c *Client) validLocked() bool {
+	return c.token != "" && c.now().Add(refreshMargin).Before(c.tokenExp)
+}
+
+func (c *Client) refresh(done chan struct{}) {
+	ctx, cancel := context.WithTimeout(context.Background(), tokenRefreshTimeout)
+	defer cancel()
 	tok, exp, err := c.fetchToken(ctx)
-	if err != nil {
-		return "", err
+	c.mu.Lock()
+	if err == nil {
+		c.token, c.tokenExp = tok, exp
 	}
-	c.token, c.tokenExp = tok, exp
-	return tok, nil
+	c.refreshErr = err
+	c.refreshing = nil
+	c.mu.Unlock()
+	close(done)
 }
 
 func (c *Client) invalidate(tok string) {
@@ -254,23 +295,27 @@ func (c *Client) invalidate(tok string) {
 }
 
 func (c *Client) fetchToken(ctx context.Context) (string, time.Time, error) {
-	var lastErr error
+	var (
+		lastErr    error
+		retryAfter string
+	)
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			if err := sleep(ctx, backoff(attempt-1, "")); err != nil {
+			if err := sleep(ctx, backoff(attempt-1, retryAfter)); err != nil {
 				return "", time.Time{}, err
 			}
 		}
 		// The token endpoint answers text/plain and rejects Accept: application/json with 406.
-		status, body, _, err := c.do(ctx, http.MethodPost, c.baseURL+tokenPath, "ApiKey "+c.apiKey, "text/plain, */*")
+		status, body, header, err := c.do(ctx, http.MethodPost, c.baseURL+tokenPath, "ApiKey "+c.apiKey, "text/plain, */*")
 		if err != nil {
 			if ctx.Err() != nil {
 				return "", time.Time{}, err
 			}
-			lastErr = err
+			lastErr, retryAfter = err, ""
 			continue
 		}
 		if status == http.StatusTooManyRequests || status >= 500 {
+			retryAfter = header.Get("Retry-After")
 			lastErr = &APIError{Method: http.MethodPost, Status: status, Path: tokenPath}
 			continue
 		}
@@ -319,9 +364,16 @@ func jwtExpiry(tok string) (time.Time, error) {
 	return time.Unix(claims.Exp, 0), nil
 }
 
+// backoff returns the wait before retry attempt+1. Retry-After (seconds or
+// HTTP date) wins, capped at 30 s.
 func backoff(attempt int, retryAfter string) time.Duration {
-	if s, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && s > 0 {
-		return min(time.Duration(s)*time.Second, 30*time.Second)
+	const maxWait = 30 * time.Second
+	retryAfter = strings.TrimSpace(retryAfter)
+	if s, err := strconv.Atoi(retryAfter); err == nil && s >= 0 {
+		return min(time.Duration(s)*time.Second, maxWait)
+	}
+	if t, err := http.ParseTime(retryAfter); err == nil {
+		return min(max(time.Until(t), 0), maxWait)
 	}
 	d := 500 * time.Millisecond << attempt
 	return d + rand.N(d/2) //nolint:gosec // retry jitter, not security-sensitive

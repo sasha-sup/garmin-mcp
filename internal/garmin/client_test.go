@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -224,5 +225,74 @@ func TestJWTExpiry(t *testing.T) {
 		if _, err := jwtExpiry(bad); err == nil {
 			t.Errorf("jwtExpiry(%q) succeeded", bad)
 		}
+	}
+}
+
+func TestTokenRefreshIsSingleFlight(t *testing.T) {
+	release := make(chan struct{})
+	var tokenCalls atomic.Int32
+	tok := FakeJWT(time.Now().Add(time.Hour))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == tokenPath {
+			tokenCalls.Add(1)
+			<-release
+			fmt.Fprint(w, tok)
+			return
+		}
+		fmt.Fprint(w, `{}`)
+	}))
+	defer srv.Close()
+	defer close(release)
+	c, err := New(testKey, WithBaseURL(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A caller with a short deadline must not wait for the slow refresh.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := c.Get(ctx, "/x", nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want deadline exceeded", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("caller blocked for %v", d)
+	}
+
+	// Concurrent callers share the in-flight refresh.
+	var wg sync.WaitGroup
+	errs := make(chan error, 5)
+	for range 5 {
+		wg.Go(func() {
+			_, err := c.Get(context.Background(), "/x", nil)
+			errs <- err
+		})
+	}
+	time.Sleep(50 * time.Millisecond)
+	release <- struct{}{}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := tokenCalls.Load(); n != 1 {
+		t.Fatalf("token calls = %d, want 1", n)
+	}
+}
+
+func TestBackoffRetryAfter(t *testing.T) {
+	if d := backoff(0, "2"); d != 2*time.Second {
+		t.Errorf("seconds form: %v", d)
+	}
+	if d := backoff(0, "3600"); d != 30*time.Second {
+		t.Errorf("cap: %v", d)
+	}
+	if d := backoff(0, time.Now().Add(5*time.Second).UTC().Format(http.TimeFormat)); d < 3*time.Second || d > 6*time.Second {
+		t.Errorf("date form: %v", d)
+	}
+	if d := backoff(1, ""); d < time.Second || d >= 1500*time.Millisecond {
+		t.Errorf("exponential: %v", d)
 	}
 }

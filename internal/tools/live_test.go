@@ -2,7 +2,7 @@
 
 // Live smoke test against the real Garmin API. It never runs by default.
 //
-//	GARMIN_API_KEY=... go test -tags live -run TestLive -v ./internal/tools/
+//	GARMIN_ENV_FILE=.env go test -tags live -run TestLive -v ./internal/tools/
 //
 // It prints only sizes and error states, never the health data itself.
 package tools
@@ -16,16 +16,22 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/sasha-sup/garmin-mcp/internal/config"
 	"github.com/sasha-sup/garmin-mcp/internal/garmin"
 )
 
 func TestLive(t *testing.T) {
-	key := os.Getenv("GARMIN_API_KEY")
+	if f := os.Getenv("GARMIN_ENV_FILE"); f != "" {
+		if _, err := config.LoadEnvFile(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := os.Getenv(config.EnvAPIKey)
 	if key == "" {
-		key = os.Getenv("GARMIN_API")
+		key = os.Getenv(config.EnvAPIKeyAlias)
 	}
 	if key == "" {
-		t.Skip("GARMIN_API_KEY not set")
+		t.Skip("GARMIN_API_KEY not set (or pass GARMIN_ENV_FILE=.env)")
 	}
 	client, err := garmin.New(key)
 	if err != nil {
@@ -38,7 +44,7 @@ func TestLive(t *testing.T) {
 		}
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "garmin-mcp", Version: "live"}, nil)
-	Register(srv, garmin.NewService(client, nil, loc, nil))
+	Register(srv, garmin.NewService(client, nil, loc, nil), Options{})
 	st, ct := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	ss, err := srv.Connect(ctx, st, nil)

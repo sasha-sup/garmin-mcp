@@ -1,5 +1,5 @@
 GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
-GOVULNCHECK   := go run golang.org/x/vuln/cmd/govulncheck@latest
+GOVULNCHECK   := go run golang.org/x/vuln/cmd/govulncheck@v1.9.0
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .PHONY: build test lint vuln live check all clean
@@ -20,7 +20,7 @@ vuln:
 
 # Calls every tool against the real API. Needs GARMIN_API_KEY (or .env).
 live:
-	set -a; [ -f .env ] && . ./.env; set +a; go test -tags live -run TestLive -count=1 -v ./internal/tools/
+	GARMIN_ENV_FILE=$(CURDIR)/.env go test -tags live -run TestLive -count=1 -v ./internal/tools/
 
 check: build
 	./bin/garmin-mcp -env-file .env -check

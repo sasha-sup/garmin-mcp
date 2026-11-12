@@ -3,11 +3,13 @@ package tools
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/sasha-sup/garmin-mcp/internal/civil"
 	"github.com/sasha-sup/garmin-mcp/internal/garmin"
 )
 
@@ -340,7 +342,7 @@ func bbOut(r garmin.BodyBatteryReport, loc *time.Location, timeline bool) BBDayO
 // HeartRateInput selects a day and aggregation interval.
 type HeartRateInput struct {
 	Date            string `json:"date,omitempty" jsonschema:"Day, YYYY-MM-DD. Default: today."`
-	IntervalMinutes int    `json:"interval_minutes,omitempty" jsonschema:"Aggregation interval in minutes, 5 to 240. Default 60."`
+	IntervalMinutes int    `json:"interval_minutes,omitempty" jsonschema:"Aggregation interval in minutes: 5, 10, 15, 20, 30, 60, 120, 180 or 240. Default 60."`
 }
 
 // HRBucket is one aggregation interval.
@@ -372,8 +374,8 @@ func (h *handlers) heartRate(ctx context.Context, _ *mcp.CallToolRequest, in Hea
 	if iv == 0 {
 		iv = 60
 	}
-	if iv < 5 || iv > 240 {
-		return nil, HeartRateOut{}, fmt.Errorf("interval_minutes must be between 5 and 240, got %d", iv)
+	if iv < 5 || iv > 240 || 1440%iv != 0 {
+		return nil, HeartRateOut{}, fmt.Errorf("interval_minutes must divide a day evenly and be 5-240 (5, 10, 15, 20, 30, 60, 120, 180, 240), got %d", iv)
 	}
 	d, err := h.svc.HeartRate(ctx, day)
 	if err != nil {
@@ -386,33 +388,40 @@ func (h *handlers) heartRate(ctx context.Context, _ *mcp.CallToolRequest, in Hea
 	}
 	out.RestingHR, out.RestingHR7d, out.MinHR, out.MaxHR = d.RestingHeartRate, d.LastSevenDaysAvgRHR, d.MinHeartRate, d.MaxHeartRate
 
+	// Bucket by local wall-clock minute since midnight, so buckets and labels
+	// stay aligned on DST days (a repeated hour folds into the same bucket).
 	loc := h.svc.Location()
 	type acc struct{ sum, n, min, max int }
-	buckets := map[int64]*acc{}
-	var order []int64
-	width := int64(iv) * 60_000
+	buckets := map[int]*acc{}
 	for _, v := range d.HeartRateValues {
 		if len(v) < 2 || v[0] == nil || v[1] == nil || *v[1] <= 0 {
 			continue
 		}
-		ts, bpm := int64(*v[0]), int(*v[1])
-		_, off := time.UnixMilli(ts).In(loc).Zone()
-		// Align buckets to local wall-clock boundaries.
-		key := (ts+int64(off)*1000)/width*width - int64(off)*1000
+		t := time.UnixMilli(int64(*v[0])).In(loc)
+		if !civil.Of(t).Equal(day) {
+			continue
+		}
+		bpm := int(*v[1])
+		key := (t.Hour()*60 + t.Minute()) / iv
 		b, ok := buckets[key]
 		if !ok {
 			b = &acc{min: bpm, max: bpm}
 			buckets[key] = b
-			order = append(order, key)
 		}
 		b.sum += bpm
 		b.n++
 		b.min, b.max = min(b.min, bpm), max(b.max, bpm)
 	}
-	for _, k := range order {
+	keys := make([]int, 0, len(buckets))
+	for k := range buckets {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
 		b := buckets[k]
+		m := k * iv
 		out.Series = append(out.Series, HRBucket{
-			Start: time.UnixMilli(k).In(loc).Format("15:04"),
+			Start: fmt.Sprintf("%02d:%02d", m/60, m%60),
 			Avg:   (b.sum + b.n/2) / b.n, Min: b.min, Max: b.max,
 		})
 	}

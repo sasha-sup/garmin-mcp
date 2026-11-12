@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -184,5 +187,73 @@ func TestActivitiesPaging(t *testing.T) {
 		if len(got) != tc.want {
 			t.Errorf("max=%d: got %d, want %d", tc.max, len(got), tc.want)
 		}
+	}
+}
+
+func TestFreshRule(t *testing.T) {
+	s := NewService(nil, nil, time.UTC, nil)
+	now := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	day := civil.Of(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)) // ended 2026-06-02 00:00
+	end := day.End(time.UTC)
+	cases := []struct {
+		name    string
+		written time.Time
+		empty   bool
+		want    bool
+	}{
+		{"settled data", end.Add(settleAfter + time.Hour), false, true},
+		{"unsettled, recent", now.Add(-freshTTL / 2), false, true},
+		{"unsettled, stale", end.Add(settleAfter - time.Hour), false, false},
+		{"empty, fetched late but not settled", end.Add(5 * 24 * time.Hour), true, false},
+		{"empty, recent", now.Add(-emptyTTL / 2), true, true},
+		{"empty, settled", end.Add(emptySettleAfter + time.Hour), true, true},
+	}
+	for _, c := range cases {
+		if got := s.fresh(day, c.written, c.empty); got != c.want {
+			t.Errorf("%s: fresh = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// A day fetched before the watch synced must not stay empty forever.
+func TestEmptyDayIsRefetched(t *testing.T) {
+	var synced atomic.Bool
+	f := newFake(t, func(w http.ResponseWriter, r *http.Request) {
+		if !synced.Load() {
+			fmt.Fprint(w, "[]")
+			return
+		}
+		fmt.Fprintf(w, `[{"calendarDate":%q,"sleepTimeSeconds":28800}]`, r.URL.Query().Get("startDate"))
+	})
+	ch, err := cache.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewService(newTestClient(t, f), ch, time.UTC, nil)
+	day := s.Today().AddDays(-5) // ended long enough ago to count as settled if it had data
+	ctx := context.Background()
+
+	if m, err := s.Sleep(ctx, day, day); err != nil || len(m) != 0 {
+		t.Fatalf("first fetch: %v, %v", m, err)
+	}
+	synced.Store(true)
+	// Age the "no data" entry past emptyTTL.
+	p := filepath.Join(ch.Dir(), "sleep", day.String()+".json")
+	old := time.Now().Add(-emptyTTL - time.Hour)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.Sleep(ctx, day, day)
+	if err != nil || len(m) != 1 {
+		t.Fatalf("after sync: %v, %v (empty day was served from cache)", m, err)
+	}
+	// Now it has data and was fetched > settleAfter after the day: cached for good.
+	before := f.dataCalls.Load()
+	if _, err := s.Sleep(ctx, day, day); err != nil {
+		t.Fatal(err)
+	}
+	if f.dataCalls.Load() != before {
+		t.Fatal("settled day was refetched")
 	}
 }

@@ -22,6 +22,7 @@ const (
 	EnvCacheDir    = "GARMIN_CACHE_DIR"
 	EnvTimeZone    = "GARMIN_TZ"
 	EnvLogLevel    = "GARMIN_LOG_LEVEL"
+	EnvSensitive   = "GARMIN_ALLOW_SENSITIVE"
 )
 
 // Config holds the resolved settings.
@@ -31,6 +32,8 @@ type Config struct {
 	CacheDir string         // "" disables the disk cache
 	Location *time.Location // the user's time zone; decides what "today" is
 	LogLevel slog.Level
+	// AllowSensitive enables reproductive-health and nutrition endpoints.
+	AllowSensitive bool
 }
 
 // Load builds a Config from the process environment.
@@ -74,6 +77,14 @@ func Load() (Config, error) {
 		cfg.Location = loc
 	}
 
+	switch v := strings.ToLower(strings.TrimSpace(os.Getenv(EnvSensitive))); v {
+	case "", "0", "false", "no":
+	case "1", "true", "yes":
+		cfg.AllowSensitive = true
+	default:
+		return Config{}, fmt.Errorf("%s=%q: want 1 or 0", EnvSensitive, v)
+	}
+
 	if lvl := strings.TrimSpace(os.Getenv(EnvLogLevel)); lvl != "" {
 		if err := cfg.LogLevel.UnmarshalText([]byte(lvl)); err != nil {
 			return Config{}, fmt.Errorf("%s=%q: want debug, info, warn or error", EnvLogLevel, lvl)
@@ -82,8 +93,10 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// LoadEnvFile reads KEY=VALUE lines from path into the process environment.
-// Variables that are already set win over the file. It returns a warning
+// LoadEnvFile reads GARMIN_* KEY=VALUE lines from path into the process
+// environment. Variables that are already set win over the file. Other keys
+// are rejected: a tampered file must not be able to set HTTPS_PROXY,
+// SSL_CERT_FILE or GODEBUG and intercept the API key. It returns a warning
 // (not an error) when the file is readable by other users.
 func LoadEnvFile(path string) (warning string, err error) {
 	f, err := os.Open(path) //nolint:gosec // reading a user-chosen env file is the purpose of this function
@@ -111,6 +124,9 @@ func LoadEnvFile(path string) (warning string, err error) {
 		key = strings.TrimSpace(key)
 		if !ok || key == "" {
 			return warning, fmt.Errorf("%s:%d: want KEY=VALUE", path, n)
+		}
+		if !strings.HasPrefix(key, "GARMIN_") {
+			return warning, fmt.Errorf("%s:%d: only GARMIN_* variables are allowed in the env file, got %q; set others in the shell", path, n, key)
 		}
 		val = unquote(strings.TrimSpace(val))
 		if _, set := os.LookupEnv(key); set {

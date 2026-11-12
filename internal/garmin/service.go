@@ -19,14 +19,20 @@ import (
 // Cache policy.
 //
 // Garmin keeps updating a day while the watch syncs, and the sleep of night N
-// is attached to day N+1. A day counts as settled once it was fetched more
-// than settleAfter after the day ended; settled days are served from cache
-// forever, the rest for at most freshTTL.
+// is attached to day N+1. A day with data counts as settled once it was
+// fetched more than settleAfter after the day ended; settled days are served
+// from cache forever, the rest for at most freshTTL.
+//
+// "No data" is different: the watch may simply not have synced yet, so an
+// empty day is re-checked every emptyTTL and only settles after
+// emptySettleAfter. Run with -clear-cache to force a full refetch.
 const (
-	settleAfter = 48 * time.Hour
-	freshTTL    = 10 * time.Minute
-	metaTTL     = 6 * time.Hour  // profile, zones, fitness age
-	activityTTL = 24 * time.Hour // single activity details
+	settleAfter      = 72 * time.Hour
+	freshTTL         = 10 * time.Minute
+	emptySettleAfter = 30 * 24 * time.Hour
+	emptyTTL         = 6 * time.Hour
+	metaTTL          = 6 * time.Hour  // profile, zones, fitness age
+	activityTTL      = 24 * time.Hour // single activity details
 )
 
 // nullJSON marks "Garmin returned nothing for this day" in the cache.
@@ -179,6 +185,7 @@ func (s *Service) Weight(ctx context.Context, from, to civil.Date) (map[string]W
 func (s *Service) Activities(ctx context.Context, from, to civil.Date, activityType, search string, limit int) ([]Activity, error) {
 	const page = 100
 	var out []Activity
+	seen := map[int64]bool{} // offset paging can repeat items if an activity syncs mid-way
 	for start := 0; len(out) < limit; start += page {
 		want := min(page, limit-len(out))
 		q := url.Values{
@@ -201,7 +208,12 @@ func (s *Service) Activities(ctx context.Context, from, to civil.Date, activityT
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, batch...)
+		for _, a := range batch {
+			if !seen[a.ActivityID] {
+				seen[a.ActivityID] = true
+				out = append(out, a)
+			}
+		}
 		if len(batch) < want {
 			break
 		}
@@ -275,13 +287,20 @@ func (s *Service) putCache(key string, data []byte) {
 }
 
 // fresh reports whether a cached entry for day, written at written, can be
-// served without asking Garmin again.
-func (s *Service) fresh(day civil.Date, written time.Time) bool {
-	if written.Sub(day.End(s.loc)) >= settleAfter {
+// served without asking Garmin again. empty marks a "no data" entry.
+func (s *Service) fresh(day civil.Date, written time.Time, empty bool) bool {
+	settle, ttl := settleAfter, freshTTL
+	if empty {
+		settle, ttl = emptySettleAfter, emptyTTL
+	}
+	if written.Sub(day.End(s.loc)) >= settle {
 		return true
 	}
-	return s.now().Sub(written) < freshTTL
+	age := s.now().Sub(written)
+	return age >= 0 && age < ttl
 }
+
+func isNull(data []byte) bool { return bytes.Equal(bytes.TrimSpace(data), nullJSON) }
 
 // daily returns decoded per-day items for [from, to], combining cache hits
 // with chunked, parallel API requests for the missing days.
@@ -293,7 +312,7 @@ func daily[T any](ctx context.Context, s *Service, k dailyKind, from, to civil.D
 	raw := make(map[string]json.RawMessage, len(days))
 	var missing []civil.Date
 	for _, d := range days {
-		if data, written, ok := s.cache.Get(k.name + "/" + d.String()); ok && s.fresh(d, written) {
+		if data, written, ok := s.cache.Get(k.name + "/" + d.String()); ok && s.fresh(d, written, isNull(data)) {
 			raw[d.String()] = data
 			continue
 		}
@@ -301,6 +320,9 @@ func daily[T any](ctx context.Context, s *Service, k dailyKind, from, to civil.D
 	}
 
 	if len(missing) > 0 {
+		// Stop sibling requests as soon as one chunk fails.
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
 		chunks := chunk(missing, k.maxSpan)
 		var (
 			mu   sync.Mutex
@@ -317,6 +339,7 @@ func daily[T any](ctx context.Context, s *Service, k dailyKind, from, to civil.D
 					mu.Lock()
 					errs = append(errs, err)
 					mu.Unlock()
+					cancel()
 					return
 				}
 				mu.Lock()
@@ -333,13 +356,13 @@ func daily[T any](ctx context.Context, s *Service, k dailyKind, from, to civil.D
 		}
 		wg.Wait()
 		if len(errs) > 0 {
-			return nil, errors.Join(errs...)
+			return nil, errs[0] // the first failure; later ones are usually cancellations it caused
 		}
 	}
 
 	out := make(map[string]T, len(raw))
 	for day, data := range raw {
-		if bytes.Equal(bytes.TrimSpace(data), nullJSON) {
+		if isNull(data) {
 			continue
 		}
 		var v T

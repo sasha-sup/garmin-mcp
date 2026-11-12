@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +56,7 @@ func fakeGarmin(t *testing.T) *httptest.Server {
 				start := time.Date(2026, 1, 1, 23, i%4*15, 0, 0, time.UTC).UnixMilli()
 				items = append(items, fmt.Sprintf(`{"calendarDate":%q,"sleepTimeSeconds":%d,"deepSleepSeconds":5400,"lightSleepSeconds":14400,
 					"remSleepSeconds":6000,"awakeSleepSeconds":600,"sleepStartTimestampLocal":%d,"sleepEndTimestampLocal":%d,"awakeCount":1,
-					"avgHeartRate":58,"lowestSpO2Value":91,"sleepNeed":{"actual":480},
+					"avgHeartRate":58,"lowestSpO2Value":91,"sleepNeed":{"baseline":480,"actual":500},
 					"sleepScores":{"overall":{"value":%d,"qualifierKey":"GOOD"},"stress":{"qualifierKey":"FAIR"}}}`,
 					d, 24000+i*120, start, start+8*3600_000, 60+i%25))
 			}
@@ -116,7 +117,7 @@ func connect(t *testing.T) *mcp.ClientSession {
 	}
 	svc := garmin.NewService(client, nil, time.UTC, nil)
 	srv := mcp.NewServer(&mcp.Implementation{Name: "garmin-mcp", Version: "test"}, &mcp.ServerOptions{Instructions: Instructions})
-	Register(srv, svc)
+	Register(srv, svc, Options{})
 
 	st, ct := mcp.NewInMemoryTransports()
 	ctx := context.Background()
@@ -203,11 +204,30 @@ func TestSleepAnalysisContent(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Nights != 28 || out.Averages.SleepHours == nil || out.Regularity.MedianBedtime == "" || len(out.Worst) != 3 {
+	if out.Nights != 28 || out.Averages.SleepHours == nil || out.Regularity.MedianOnset == "" || len(out.Worst) != 3 {
 		t.Fatalf("unexpected analysis: %s", text)
 	}
-	if out.Averages.DebtHoursWeek == nil {
-		t.Errorf("sleep debt missing: need 8 h, slept less on most nights")
+	// Need is the 480 min baseline, not the adjusted 500 min "actual".
+	if out.Averages.SleepNeedHours == nil || *out.Averages.SleepNeedHours != 8 {
+		t.Errorf("sleep need = %v, want 8 (baseline)", out.Averages.SleepNeedHours)
+	}
+	if out.Averages.WeeklyShortfallH == nil || *out.Averages.WeeklyShortfallH <= 0 {
+		t.Errorf("weekly shortfall missing: need 8 h, slept ~7.1 h")
+	}
+	if out.StageShare.Nights != 28 {
+		t.Errorf("stage nights = %d", out.StageShare.Nights)
+	}
+	for _, f := range out.Factors {
+		if (f.NightsWith < minFactorNights || f.NightsWithout < minFactorNights) && f.ScoreDiff != nil {
+			t.Errorf("factor %q shows a difference with %d/%d nights", f.Factor, f.NightsWith, f.NightsWithout)
+		}
+	}
+	for _, w := range out.Worst {
+		for _, b := range out.Best {
+			if w.Date == b.Date {
+				t.Errorf("night %s is both worst and best", w.Date)
+			}
+		}
 	}
 }
 
@@ -221,8 +241,11 @@ func TestRecoveryStatusContent(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.HRV == nil || out.RestingHR == nil || out.Sleep == nil || out.Load == nil || len(out.Signals) == 0 {
+	if out.HRV == nil || out.RestingHR.Value == nil || out.Sleep == nil || out.Load == nil || len(out.Signals) == 0 {
 		t.Fatalf("incomplete snapshot: %s", text)
+	}
+	if out.RestingHR.N != baselineDays || out.RestingHR.Z == nil {
+		t.Errorf("resting HR baseline n=%d z=%v, want n=%d and a z-score", out.RestingHR.N, out.RestingHR.Z, baselineDays)
 	}
 }
 
@@ -247,6 +270,8 @@ func TestInputValidation(t *testing.T) {
 		{"garmin_sleep", map[string]any{"start_date": "2026-01-10", "end_date": "2026-01-01"}},
 		{"garmin_body_battery", map[string]any{"days": 40}},
 		{"garmin_heart_rate", map[string]any{"interval_minutes": 1}},
+		{"garmin_heart_rate", map[string]any{"interval_minutes": 7}},
+		{"garmin_api_get", map[string]any{"endpoint": "menstrual_cycle_summary", "date": "2026-01-01"}},
 		{"garmin_activities", map[string]any{"limit": 500}},
 		{"garmin_activity", map[string]any{"activity_id": -1}},
 		{"garmin_trends", map[string]any{"period": "year"}},
@@ -299,5 +324,68 @@ func TestRawTruncation(t *testing.T) {
 	}
 	if !strings.HasPrefix(text, `{"x":"я`) {
 		t.Fatal("bad prefix")
+	}
+}
+
+func TestHeartRateBucketsOnDSTDay(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Skip("tzdata unavailable")
+	}
+	// 2026-03-29: clocks jump from 02:00 to 03:00 in Berlin.
+	var vals []string
+	for ts := time.Date(2026, 3, 29, 0, 0, 0, 0, berlin); ts.Before(time.Date(2026, 3, 30, 0, 0, 0, 0, berlin)); ts = ts.Add(30 * time.Minute) {
+		vals = append(vals, fmt.Sprintf("[%d,60]", ts.UnixMilli()))
+	}
+	g := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/token") {
+			enc := base64.RawURLEncoding.EncodeToString
+			fmt.Fprint(w, enc([]byte(`{}`))+"."+enc(fmt.Appendf(nil, `{"exp":%d}`, time.Now().Add(time.Hour).Unix()))+".c2ln")
+			return
+		}
+		fmt.Fprintf(w, `{"calendarDate":"2026-03-29","heartRateValues":[%s]}`, strings.Join(vals, ","))
+	}))
+	defer g.Close()
+	client, _ := garmin.New("k", garmin.WithBaseURL(g.URL))
+	h := &handlers{svc: garmin.NewService(client, nil, berlin, nil)}
+	_, out, err := h.heartRate(context.Background(), nil, HeartRateInput{Date: "2026-03-29", IntervalMinutes: 240})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var starts []string
+	for _, b := range out.Series {
+		starts = append(starts, b.Start)
+	}
+	if got := strings.Join(starts, ","); got != "00:00,04:00,08:00,12:00,16:00,20:00" {
+		t.Fatalf("buckets = %s", got)
+	}
+}
+
+func TestSensitiveEndpointsOptIn(t *testing.T) {
+	if slices.Contains(RawEndpointNames(false), "menstrual_cycle_day") {
+		t.Fatal("sensitive endpoint enabled by default")
+	}
+	if !slices.Contains(RawEndpointNames(true), "menstrual_cycle_day") {
+		t.Fatal("sensitive endpoint missing when allowed")
+	}
+}
+
+func TestSleepTimingAcrossMidnight(t *testing.T) {
+	ms := func(h, m int) *int64 { v := time.Date(2026, 1, 1, h, m, 0, 0, time.UTC).UnixMilli(); return &v }
+	next := func(h, m int) *int64 { v := time.Date(2026, 1, 2, h, m, 0, 0, time.UTC).UnixMilli(); return &v }
+	cases := []struct {
+		start, end *int64
+		onset      string
+		wake       string
+	}{
+		{ms(23, 30), next(7, 0), "23:30", "07:00"},
+		{next(0, 45), next(8, 15), "00:45", "08:15"},
+		{ms(20, 0), next(4, 0), "20:00", "04:00"},
+	}
+	for _, c := range cases {
+		o, w, ok := sleepTiming(garmin.DailySleep{SleepStartTimestampLocal: c.start, SleepEndTimestampLocal: c.end})
+		if !ok || clockFrom18(o) != c.onset || clockFrom18(w) != c.wake || w <= o {
+			t.Errorf("got %s-%s (%v), want %s-%s", clockFrom18(o), clockFrom18(w), ok, c.onset, c.wake)
+		}
 	}
 }

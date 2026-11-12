@@ -27,17 +27,20 @@ type Cache struct {
 	dir string
 }
 
-// New creates (or reuses) the cache directory and tightens its permissions.
+// maxEntryBytes bounds what Get reads, matching the client's response limit.
+const maxEntryBytes = 32 << 20
+
+// New creates (or reuses) the cache directory. New directories get mode 0700.
+// Only the versioned subdirectory the cache owns is chmod-ed, so pointing
+// GARMIN_CACHE_DIR at an existing directory never changes its mode.
 func New(dir string) (*Cache, error) {
 	root := filepath.Join(dir, version)
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
 	// MkdirAll does not change the mode of a directory that already exists.
-	for _, p := range []string{dir, root} {
-		if err := os.Chmod(p, 0o700); err != nil { //nolint:gosec // directories need the x bit; 0700 is owner-only
-			return nil, fmt.Errorf("restrict cache dir permissions: %w", err)
-		}
+	if err := os.Chmod(root, 0o700); err != nil { //nolint:gosec // directories need the x bit; 0700 is owner-only
+		return nil, fmt.Errorf("restrict cache dir permissions: %w", err)
 	}
 	return &Cache{dir: root}, nil
 }
@@ -66,13 +69,17 @@ func (c *Cache) Get(key string) (data []byte, written time.Time, ok bool) {
 	if err != nil {
 		return nil, time.Time{}, false
 	}
+	// Refuse symlinks and oversized or special files.
+	if st, err := os.Lstat(p); err != nil || !st.Mode().IsRegular() || st.Size() > maxEntryBytes {
+		return nil, time.Time{}, false
+	}
 	f, err := os.Open(p) //nolint:gosec // p is built from a key validated by keyRE
 	if err != nil {
 		return nil, time.Time{}, false
 	}
 	defer f.Close()
 	st, err := f.Stat()
-	if err != nil {
+	if err != nil || !st.Mode().IsRegular() || st.Size() > maxEntryBytes {
 		return nil, time.Time{}, false
 	}
 	data = make([]byte, st.Size())

@@ -38,7 +38,7 @@ func TestLoadEnvFile(t *testing.T) {
 }
 
 func TestLoadEnvFileWarnsOnLoosePermissions(t *testing.T) {
-	p := writeFile(t, "X_GARMIN_TEST=1\n", 0o644)
+	p := writeFile(t, "GARMIN_X_TEST=1\n", 0o644)
 	if err := os.Chmod(p, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -49,12 +49,15 @@ func TestLoadEnvFileWarnsOnLoosePermissions(t *testing.T) {
 	if !strings.Contains(warn, "chmod 600") {
 		t.Errorf("warning = %q", warn)
 	}
-	os.Unsetenv("X_GARMIN_TEST")
+	os.Unsetenv("GARMIN_X_TEST")
 }
 
 func TestLoadEnvFileRejectsGarbage(t *testing.T) {
 	if _, err := LoadEnvFile(writeFile(t, "not a pair\n", 0o600)); err == nil {
 		t.Fatal("want error")
+	}
+	if _, err := LoadEnvFile(writeFile(t, "HTTPS_PROXY=http://evil:8080\n", 0o600)); err == nil {
+		t.Fatal("want error for non-GARMIN_ key")
 	}
 	if _, err := LoadEnvFile(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("want error for missing file")
