@@ -1,0 +1,47 @@
+{
+  "manifest_version": "0.3",
+  "name": "garmin-mcp",
+  "display_name": "Garmin Connect (unofficial)",
+  "version": "0.0.0",
+  "description": "Read-only access to your own Garmin Connect data: sleep, HRV, heart rate, stress, Body Battery, workouts.",
+  "long_description": "Unofficial MCP server for the official Garmin Connect Personal API. Analyses sleep quality and recovery against your own baseline. Not affiliated with Garmin Ltd.",
+  "author": { "name": "sasha-sup", "url": "https://github.com/sasha-sup" },
+  "repository": { "type": "git", "url": "https://github.com/sasha-sup/garmin-mcp" },
+  "homepage": "https://github.com/sasha-sup/garmin-mcp",
+  "documentation": "https://github.com/sasha-sup/garmin-mcp#readme",
+  "support": "https://github.com/sasha-sup/garmin-mcp/issues",
+  "license": "MIT",
+  "keywords": ["garmin", "sleep", "hrv", "health", "fitness", "wearables"],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/garmin-mcp-linux",
+    "mcp_config": {
+      "command": "${__dirname}/server/garmin-mcp-linux",
+      "args": [],
+      "env": {
+        "GARMIN_API_KEY": "${user_config.garmin_api_key}",
+        "GARMIN_TZ": "${user_config.time_zone}"
+      },
+      "platform_overrides": {
+        "darwin": { "command": "${__dirname}/server/garmin-mcp-darwin" },
+        "win32": { "command": "${__dirname}/server/garmin-mcp-windows.exe" }
+      }
+    }
+  },
+  "user_config": {
+    "garmin_api_key": {
+      "type": "string",
+      "title": "Garmin Personal API key",
+      "description": "Create it at https://connect.garmin.com/app/settings/personalApiToken",
+      "sensitive": true,
+      "required": true
+    },
+    "time_zone": {
+      "type": "string",
+      "title": "Time zone",
+      "description": "Your IANA time zone, e.g. Europe/Berlin. Leave empty to use the system zone.",
+      "required": false
+    }
+  },
+  "compatibility": { "platforms": ["darwin", "win32", "linux"] }
+}

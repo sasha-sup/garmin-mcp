@@ -1,0 +1,50 @@
+#!/bin/sh
+# Starts the garmin-mcp release binary that matches this plugin's version.
+# On first run it downloads the archive from GitHub Releases, verifies its
+# SHA-256 against the release's checksums.txt and caches it in the plugin
+# data directory. stdout is the MCP channel: all messages go to stderr.
+set -eu
+
+root=$(CDPATH="" cd -- "$(dirname -- "$0")/.." && pwd)
+version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$root/.claude-plugin/plugin.json" | head -n 1)
+[ -n "$version" ] || { echo "garmin-mcp-launcher: cannot read version from $root/.claude-plugin/plugin.json" >&2; exit 1; }
+
+case "$(uname -s)" in
+  Linux) os=linux ;;
+  Darwin) os=darwin ;;
+  *) echo "garmin-mcp-launcher: $(uname -s) is not supported; on Windows install the .mcpb bundle or the release zip" >&2; exit 1 ;;
+esac
+case "$(uname -m)" in
+  x86_64 | amd64) arch=amd64 ;;
+  aarch64 | arm64) arch=arm64 ;;
+  *) echo "garmin-mcp-launcher: CPU $(uname -m) is not supported" >&2; exit 1 ;;
+esac
+[ "$os" = darwin ] && arch=all # universal binary
+
+data=${CLAUDE_PLUGIN_DATA:-${XDG_CACHE_HOME:-$HOME/.cache}/garmin-mcp-plugin}
+dir="$data/v$version"
+bin="$dir/garmin-mcp"
+if [ ! -x "$bin" ]; then
+  archive="garmin-mcp_${version}_${os}_${arch}.tar.gz"
+  base="https://github.com/sasha-sup/garmin-mcp/releases/download/v$version"
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  echo "garmin-mcp-launcher: downloading $archive" >&2
+  if ! curl -fsSL --proto '=https' -o "$tmp/$archive" "$base/$archive" ||
+    ! curl -fsSL --proto '=https' -o "$tmp/checksums.txt" "$base/checksums.txt"; then
+    echo "garmin-mcp-launcher: download failed from $base; check the network or that release v$version exists" >&2
+    exit 1
+  fi
+  want=$(awk -v f="$archive" '$2 == f { print $1 }' "$tmp/checksums.txt")
+  if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp/$archive" | awk '{print $1}')
+  else got=$(shasum -a 256 "$tmp/$archive" | awk '{print $1}'); fi
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    echo "garmin-mcp-launcher: checksum mismatch for $archive; refusing to run it" >&2
+    exit 1
+  fi
+  tar -xzf "$tmp/$archive" -C "$tmp" garmin-mcp
+  mkdir -p "$dir"
+  chmod 0755 "$tmp/garmin-mcp"
+  mv "$tmp/garmin-mcp" "$bin"
+fi
+exec "$bin" "$@"

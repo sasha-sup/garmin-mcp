@@ -97,6 +97,15 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestLoadStripsQuotedKey(t *testing.T) {
+	t.Setenv(EnvAPIKey, `"abc"`)
+	t.Setenv(EnvCacheDir, "off")
+	cfg, err := Load()
+	if err != nil || cfg.APIKey != "abc" {
+		t.Fatalf("key = %q, err = %v", cfg.APIKey, err)
+	}
+}
+
 func TestLoadErrors(t *testing.T) {
 	cases := map[string]map[string]string{
 		"no key":     {EnvAPIKey: "", EnvAPIKeyAlias: ""},

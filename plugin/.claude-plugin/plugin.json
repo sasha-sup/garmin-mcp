@@ -1,0 +1,34 @@
+{
+  "name": "garmin-mcp",
+  "version": "0.1.0",
+  "description": "Unofficial MCP server for your own Garmin Connect data: sleep, HRV, heart rate, stress, Body Battery, workouts, with sleep and recovery analysis.",
+  "author": { "name": "sasha-sup", "url": "https://github.com/sasha-sup" },
+  "homepage": "https://github.com/sasha-sup/garmin-mcp",
+  "repository": "https://github.com/sasha-sup/garmin-mcp",
+  "license": "MIT",
+  "keywords": ["garmin", "sleep", "hrv", "health", "mcp"],
+  "userConfig": {
+    "garmin_api_key": {
+      "type": "string",
+      "title": "Garmin Personal API key",
+      "description": "Create it at https://connect.garmin.com/app/settings/personalApiToken",
+      "sensitive": true,
+      "required": true
+    },
+    "time_zone": {
+      "type": "string",
+      "title": "Time zone",
+      "description": "Your IANA time zone, e.g. Europe/Berlin. Leave empty to use the system zone.",
+      "default": ""
+    }
+  },
+  "mcpServers": {
+    "garmin": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/garmin-mcp-launcher",
+      "env": {
+        "GARMIN_API_KEY": "${user_config.garmin_api_key}",
+        "GARMIN_TZ": "${user_config.time_zone}"
+      }
+    }
+  }
+}

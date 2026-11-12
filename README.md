@@ -4,6 +4,8 @@
 
 **English** | [Русский](README.ru.md)
 
+> **Unofficial.** This project is not affiliated with, endorsed by or supported by Garmin Ltd. "Garmin" is a trademark of Garmin Ltd. or its subsidiaries; it is used here only to describe compatibility.
+
 An MCP server that gives Claude (or any other MCP client) **read-only** access to your own
 Garmin Connect data: sleep, HRV, heart rate, stress, Body Battery, daily activity, workouts and weight.
 It uses the official [Garmin Connect Personal API](https://developer.garmin.com/gc-developer-program/personal/personal-api/).
@@ -21,13 +23,19 @@ sleep; Claude turns that into concrete recommendations.
    accept the terms → choose an expiry (30, 90, 180 days or 1 year) → copy the key.
    The key is shown **once**. Garmin emails you about a week before it expires.
 
-2. **Build** (Go 1.27.4+; an older Go 1.21+ downloads the right toolchain automatically):
+2. **Install** — pick the option that fits your client:
 
-   ```sh
-   make build            # binary in bin/garmin-mcp
-   ```
+   | Client | How |
+   |---|---|
+   | **Claude Desktop** | Download `garmin-mcp.mcpb` from the [latest release](https://github.com/sasha-sup/garmin-mcp/releases/latest) and open it. Claude Desktop asks for the API key (stored securely) and time zone. Bundled for macOS (Intel and Apple Silicon), Windows x64 and Linux x64 |
+   | **Claude Code (plugin)** | `/plugin marketplace add sasha-sup/garmin-mcp`, then `/plugin install garmin-mcp@garmin-mcp`; Claude Code asks for the key. On first start the plugin downloads the release binary and verifies its SHA-256. macOS and Linux |
+   | **Claude Code (binary)** | Install the binary (row below), then `claude mcp add -s user garmin -- garmin-mcp -env-file /path/to/.env` |
+   | **Binary** | Archives for Linux, macOS and Windows on the [releases page](https://github.com/sasha-sup/garmin-mcp/releases/latest), or `go install github.com/sasha-sup/garmin-mcp/cmd/garmin-mcp@latest` |
+   | **Docker** | `docker run -i --rm -e GARMIN_API_KEY -e GARMIN_TZ ghcr.io/sasha-sup/garmin-mcp` as the MCP command (images for amd64 and arm64) |
+   | **Any MCP client** | Listed in the [MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.sasha-sup/garmin-mcp` |
+   | **From source** | `make build` (Go 1.27.4+; Go 1.21+ downloads it automatically) → `bin/garmin-mcp` |
 
-3. **Configure:**
+3. **Configure** (binary and source installs; the plugin and the bundle ask for the values instead):
 
    ```sh
    cp .env.example .env
@@ -38,32 +46,26 @@ sleep; Claude turns that into concrete recommendations.
 4. **Check:**
 
    ```sh
-   ./bin/garmin-mcp -env-file .env -check
+   garmin-mcp -env-file .env -check
    # auth ok: access token valid until 2026-11-13 10:33:12
    # profile ok: Garmin time zone Europe/Berlin, server time zone Europe/Berlin (CET +01:00)
    # data ok: 7 of the last 7 days have a daily summary
    ```
 
-5. **Connect to Claude Code** (for all projects: `-s user`):
-
-   ```sh
-   claude mcp add -s user garmin -- "$PWD/bin/garmin-mcp" -env-file "$PWD/.env"
-   ```
-
-   Claude Desktop, in `claude_desktop_config.json`:
+   Claude Desktop, in `claude_desktop_config.json`, if you prefer the binary over the bundle:
 
    ```json
    {
      "mcpServers": {
        "garmin": {
-         "command": "/absolute/path/bin/garmin-mcp",
+         "command": "/absolute/path/garmin-mcp",
          "args": ["-env-file", "/absolute/path/.env"]
        }
      }
    }
    ```
 
-6. **Ask Claude**, for example:
+5. **Ask Claude**, for example:
    - "Analyse my sleep over the last month and give me recommendations"
    - "How recovered am I today? Is a hard workout a good idea?"
    - "How have my resting heart rate and HRV changed over six months?"
@@ -158,6 +160,13 @@ make live    # every tool against the real API (needs .env); prints response siz
 make all     # lint + test + vuln + build
 make ci-lint # validate the GitHub Actions workflows (actionlint)
 ```
+
+### Releases
+
+Push a tag `vX.Y.Z` from a commit where `plugin/.claude-plugin/plugin.json` has version `X.Y.Z`.
+`.github/workflows/release.yml` then builds the archives and `garmin-mcp.mcpb` (GoReleaser),
+pushes `ghcr.io/sasha-sup/garmin-mcp:X.Y.Z` (amd64 and arm64) and publishes `server.json` to the
+MCP Registry with GitHub OIDC (no stored secrets).
 
 ### CI
 

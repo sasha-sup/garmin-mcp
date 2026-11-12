@@ -40,6 +40,10 @@ jobs:
           vuln=$(grep -oE 'govulncheck@v[0-9.]+' Makefile | cut -d@ -f2)
           grep -qE "^ +version: ${lint}( |$)" .github/workflows/ci.yml || { echo "::error::golangci-lint ${lint} from the Makefile differs from the golangci-lint-action version input: update both"; exit 1; }
           grep -qE "govulncheck@${vuln} " .github/workflows/ci.yml || { echo "::error::govulncheck ${vuln} from the Makefile differs from ci.yml: update both"; exit 1; }
+      - name: Shell scripts
+        run: shellcheck plugin/bin/garmin-mcp-launcher scripts/*.sh
+      - name: GoReleaser config
+        run: go run github.com/goreleaser/goreleaser/v2@v2.20.1 check
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0 # keep in sync with the Makefile (checked above)
@@ -87,3 +91,20 @@ jobs:
           go-version-file: go.mod
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./... # keep in sync with the Makefile
+
+  docker:
+    name: Docker build
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and smoke-test the image
+        run: |
+          docker build -t garmin-mcp:ci .
+          # stdin stays open briefly: the server stops when it closes.
+          { printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}'; sleep 2; } \
+            | docker run -i --rm -e GARMIN_API_KEY=dummy garmin-mcp:ci | grep -q '"serverInfo"' \
+            || { echo "::error::the image did not answer an MCP initialize request"; exit 1; }

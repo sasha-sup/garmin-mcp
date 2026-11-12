@@ -1,0 +1,12 @@
+{
+  "name": "garmin-mcp",
+  "owner": { "name": "sasha-sup", "url": "https://github.com/sasha-sup" },
+  "metadata": { "description": "Unofficial Garmin Connect MCP server for Claude Code" },
+  "plugins": [
+    {
+      "name": "garmin-mcp",
+      "source": "./plugin",
+      "description": "Read-only access to your own Garmin Connect data (sleep, HRV, heart rate, stress, Body Battery) with sleep and recovery analysis. Unofficial."
+    }
+  ]
+}

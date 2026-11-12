@@ -4,6 +4,8 @@
 
 [English](README.md) | **Русский**
 
+> **Неофициальный проект.** Не связан с Garmin Ltd., не одобрен и не поддерживается ею. «Garmin» — товарный знак Garmin Ltd. или её дочерних компаний; здесь он используется только для описания совместимости.
+
 MCP-сервер, который даёт Claude (или другому MCP-клиенту) доступ **только на чтение** к вашим данным
 из Garmin Connect: сон, HRV, пульс, стресс, Body Battery, активность, тренировки, вес.
 Работает через официальный [Garmin Connect Personal API](https://developer.garmin.com/gc-developer-program/personal/personal-api/).
@@ -22,13 +24,19 @@ MCP-сервер, который даёт Claude (или другому MCP-кл
    *Create Key* → примите условия → выберите срок (30, 90, 180 дней или 1 год) → скопируйте ключ.
    Ключ показывается **один раз**. За неделю до истечения Garmin пришлёт письмо.
 
-2. **Сборка** (нужен Go 1.27.4+; Go 1.21+ сам скачает нужную версию):
+2. **Установка** — выберите вариант под свой клиент:
 
-   ```sh
-   make build            # бинарник в bin/garmin-mcp
-   ```
+   | Клиент | Как |
+   |---|---|
+   | **Claude Desktop** | Скачайте `garmin-mcp.mcpb` из [последнего релиза](https://github.com/sasha-sup/garmin-mcp/releases/latest) и откройте его. Claude Desktop спросит ключ API (хранится в защищённом хранилище) и часовой пояс. Внутри бинарники для macOS (Intel и Apple Silicon), Windows x64 и Linux x64 |
+   | **Claude Code (плагин)** | `/plugin marketplace add sasha-sup/garmin-mcp`, затем `/plugin install garmin-mcp@garmin-mcp`; Claude Code спросит ключ. При первом запуске плагин скачает бинарник из релиза и проверит его SHA-256. macOS и Linux |
+   | **Claude Code (бинарник)** | Установите бинарник (строка ниже), затем `claude mcp add -s user garmin -- garmin-mcp -env-file /путь/к/.env` |
+   | **Бинарник** | Архивы для Linux, macOS и Windows на [странице релизов](https://github.com/sasha-sup/garmin-mcp/releases/latest) или `go install github.com/sasha-sup/garmin-mcp/cmd/garmin-mcp@latest` |
+   | **Docker** | `docker run -i --rm -e GARMIN_API_KEY -e GARMIN_TZ ghcr.io/sasha-sup/garmin-mcp` как команда MCP-сервера (образы для amd64 и arm64) |
+   | **Любой MCP-клиент** | Сервер есть в [MCP Registry](https://registry.modelcontextprotocol.io) как `io.github.sasha-sup/garmin-mcp` |
+   | **Из исходников** | `make build` (Go 1.27.4+; Go 1.21+ скачает его сам) → `bin/garmin-mcp` |
 
-3. **Настройка:**
+3. **Настройка** (для бинарника и сборки из исходников; плагин и бандл спрашивают значения сами):
 
    ```sh
    cp .env.example .env
@@ -39,32 +47,26 @@ MCP-сервер, который даёт Claude (или другому MCP-кл
 4. **Проверка:**
 
    ```sh
-   ./bin/garmin-mcp -env-file .env -check
+   garmin-mcp -env-file .env -check
    # auth ok: access token valid until 2026-11-13 10:33:12
    # profile ok: Garmin time zone Europe/Berlin, server time zone Europe/Berlin (CET +01:00)
    # data ok: 7 of the last 7 days have a daily summary
    ```
 
-5. **Подключение к Claude Code** (для всех проектов — `-s user`):
-
-   ```sh
-   claude mcp add -s user garmin -- "$PWD/bin/garmin-mcp" -env-file "$PWD/.env"
-   ```
-
-   Claude Desktop: в `claude_desktop_config.json`
+   Claude Desktop с бинарником вместо бандла — в `claude_desktop_config.json`:
 
    ```json
    {
      "mcpServers": {
        "garmin": {
-         "command": "/абсолютный/путь/bin/garmin-mcp",
+         "command": "/абсолютный/путь/garmin-mcp",
          "args": ["-env-file", "/абсолютный/путь/.env"]
        }
      }
    }
    ```
 
-6. **Спросите Claude**, например:
+5. **Спросите Claude**, например:
    - «Проанализируй мой сон за последний месяц и дай рекомендации»
    - «Как я восстановился сегодня? Можно тренироваться интенсивно?»
    - «Как менялись пульс покоя и HRV за полгода?»
@@ -158,6 +160,13 @@ make live    # все инструменты против настоящего A
 make all     # lint + test + vuln + build
 make ci-lint # проверка workflow-файлов GitHub Actions (actionlint)
 ```
+
+### Релизы
+
+Создайте тег `vX.Y.Z` на коммите, где в `plugin/.claude-plugin/plugin.json` стоит версия `X.Y.Z`.
+`.github/workflows/release.yml` соберёт архивы и `garmin-mcp.mcpb` (GoReleaser), опубликует
+`ghcr.io/sasha-sup/garmin-mcp:X.Y.Z` (amd64 и arm64) и отправит `server.json` в MCP Registry
+через GitHub OIDC (без хранимых секретов).
 
 ### CI
 

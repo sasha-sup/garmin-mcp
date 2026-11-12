@@ -1,0 +1,29 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.sasha-sup/garmin-mcp",
+  "title": "Garmin Connect (unofficial)",
+  "description": "Unofficial read-only Garmin Connect data: sleep, HRV, heart rate, stress, recovery analysis.",
+  "repository": { "url": "https://github.com/sasha-sup/garmin-mcp", "source": "github" },
+  "version": "0.0.0",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/sasha-sup/garmin-mcp:0.0.0",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        { "name": "GARMIN_API_KEY", "description": "Garmin Personal API key from https://connect.garmin.com/app/settings/personalApiToken", "isRequired": true, "isSecret": true },
+        { "name": "GARMIN_TZ", "description": "Your IANA time zone, e.g. Europe/Berlin (default: UTC in the container)", "isRequired": false }
+      ]
+    },
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/sasha-sup/garmin-mcp/releases/download/v0.0.0/garmin-mcp.mcpb",
+      "fileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        { "name": "GARMIN_API_KEY", "description": "Garmin Personal API key from https://connect.garmin.com/app/settings/personalApiToken", "isRequired": true, "isSecret": true },
+        { "name": "GARMIN_TZ", "description": "Your IANA time zone, e.g. Europe/Berlin (default: system zone)", "isRequired": false }
+      ]
+    }
+  ]
+}

@@ -94,6 +94,15 @@ Each rule has a reason. Breaking one is a bug even when the tests pass.
 4. Document it in **both** `README.md` and `README.ru.md` (tool table); keep the two in sync.
 5. `make all`, then `make live` if you have a key.
 
+## Releasing
+
+1. Set the new version in `plugin/.claude-plugin/plugin.json` (the release fails if it differs from the tag).
+2. `make all`, commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. `release.yml` builds archives + `garmin-mcp.mcpb`, pushes the ghcr.io image and publishes `server.json`
+   (version, image tag and bundle SHA-256 are filled in by the workflow; keep the placeholders in git).
+4. Packaging files: `.goreleaser.yaml`, `Dockerfile` (keep the `io.modelcontextprotocol.server.name` label),
+   `packaging/mcpb/manifest.json` + `scripts/build-mcpb.sh`, `.claude-plugin/marketplace.json` + `plugin/`.
+
 ## Commits
 
 Conventional Commits (`feat:`, `fix:`, `ci:`, `docs:`, `test:`). Small, focused commits. No AI attribution
