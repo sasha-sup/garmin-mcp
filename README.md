@@ -70,7 +70,7 @@ sleep; Claude turns that into concrete recommendations.
    - "What hurts my sleep more: stress or late workouts?"
 
    Or run a ready-made prompt. In Claude Code they are `/mcp__garmin__sleep_review`,
-   `/mcp__garmin__wellbeing_review` and `/mcp__garmin__readiness_check` (optionally with a number of days).
+   `/mcp__garmin__wellbeing_review` (both take an optional number of days) and `/mcp__garmin__readiness_check`.
 
 ## Tools
 

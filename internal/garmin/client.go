@@ -146,17 +146,26 @@ func (c *Client) CheckAuth(ctx context.Context) (expires time.Time, err error) {
 }
 
 // Get performs a GET request and returns the response body. It returns
-// ErrNoData for HTTP 204 and *APIError for other non-2xx responses.
+// ErrNoData for HTTP 204 and *APIError for other non-2xx responses. On HTTP
+// 401 it fetches a new token once, since Garmin may revoke a token early.
 func (c *Client) Get(ctx context.Context, path string, query url.Values) ([]byte, error) {
 	u := c.baseURL + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
-	var body []byte
-	reauthed := false
-	err := retry(ctx, func() (bool, string, error) {
-		tok, err := c.bearer(ctx, false)
-		if err != nil {
+	body, tok, err := c.getWithRetry(ctx, u, path)
+	if apiErr, ok := errors.AsType[*APIError](err); ok && apiErr.Status == http.StatusUnauthorized {
+		c.invalidate(tok)
+		body, _, err = c.getWithRetry(ctx, u, path)
+	}
+	return body, err
+}
+
+// getWithRetry performs one GET with retries on transient failures and
+// returns the token it used.
+func (c *Client) getWithRetry(ctx context.Context, u, path string) (body []byte, tok string, err error) {
+	err = retry(ctx, func() (bool, string, error) {
+		if tok, err = c.bearer(ctx, false); err != nil {
 			return false, "", err
 		}
 		status, b, header, err := c.do(ctx, http.MethodGet, u, "Bearer "+tok, "application/json")
@@ -170,17 +179,12 @@ func (c *Client) Get(ctx context.Context, path string, query url.Values) ([]byte
 			return false, "", nil
 		case status == http.StatusNoContent:
 			return false, "", ErrNoData
-		case status == http.StatusUnauthorized && !reauthed:
-			// The token may have been revoked early: get a new one once, right away.
-			reauthed = true
-			c.invalidate(tok)
-			return true, "0", apiErr
 		case status == http.StatusTooManyRequests || status >= 500:
 			return true, header.Get("Retry-After"), apiErr
 		}
 		return false, "", apiErr
 	})
-	return body, err
+	return body, tok, err
 }
 
 // retry calls attempt until it succeeds, fails permanently, the context ends

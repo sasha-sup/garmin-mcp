@@ -71,7 +71,7 @@ MCP-сервер, который даёт Claude (или другому MCP-кл
    - «От чего у меня хуже сон — от стресса или поздних тренировок?»
 
    Или запустите готовый prompt: в Claude Code это `/mcp__garmin__sleep_review`,
-   `/mcp__garmin__wellbeing_review`, `/mcp__garmin__readiness_check` (можно передать число дней).
+   `/mcp__garmin__wellbeing_review` (оба принимают необязательное число дней) и `/mcp__garmin__readiness_check`.
 
 ## Инструменты
 

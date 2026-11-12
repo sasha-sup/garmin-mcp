@@ -26,9 +26,12 @@ func TestLive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if os.Getenv(config.EnvAPIKey) == "" && os.Getenv(config.EnvAPIKeyAlias) == "" {
+		t.Skip("GARMIN_API_KEY not set (or pass GARMIN_ENV_FILE=.env)")
+	}
 	cfg, err := config.Load()
 	if err != nil {
-		t.Skip(err)
+		t.Fatal(err)
 	}
 	client, err := garmin.New(cfg.APIKey)
 	if err != nil {

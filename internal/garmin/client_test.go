@@ -296,3 +296,27 @@ func TestBackoffRetryAfter(t *testing.T) {
 		t.Errorf("exponential: %v", d)
 	}
 }
+
+// A 401 must trigger one re-auth even after the retry budget for transient
+// errors was used up.
+func TestReauthAfterTransientErrors(t *testing.T) {
+	var calls atomic.Int32
+	f := newFake(t, func(w http.ResponseWriter, _ *http.Request) {
+		switch n := calls.Add(1); {
+		case n <= 3:
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case n == 4:
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			fmt.Fprint(w, `{}`)
+		}
+	})
+	c := newTestClient(t, f)
+	if _, err := c.Get(context.Background(), "/x", nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.tokenCalls.Load(); n != 2 {
+		t.Fatalf("token calls = %d, want 2", n)
+	}
+}

@@ -320,11 +320,10 @@ func sleepFactors(nights []night, sums map[string]garmin.DailySummary, acts []ga
 			continue
 		}
 		f := SleepFactor{Factor: c.name, NightsWith: with.nights, NightsWithout: without.nights}
-		if with.nights >= minFactorNights && without.nights >= minFactorNights {
+		// Gate on scored nights: the comparison is about the sleep score.
+		if with.score.n >= minFactorNights && without.score.n >= minFactorNights {
 			f.ScoreWith, f.ScoreWithout = with.score.value(0), without.score.value(0)
-			if f.ScoreWith != nil && f.ScoreWithout != nil {
-				f.ScoreDiff = new(round(*f.ScoreWith-*f.ScoreWithout, 0))
-			}
+			f.ScoreDiff = new(round(*f.ScoreWith-*f.ScoreWithout, 0))
 			f.HRVWith, f.HRVWithout = with.hrv.value(0), without.hrv.value(0)
 			f.SleepHRWith, f.SleepHRWithout = with.hrSl.value(0), without.hrSl.value(0)
 		}
