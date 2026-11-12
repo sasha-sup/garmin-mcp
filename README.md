@@ -1,38 +1,41 @@
 # garmin-mcp
 
-MCP-сервер, который даёт Claude (или другому MCP-клиенту) доступ **только на чтение** к вашим данным
-из Garmin Connect: сон, HRV, пульс, стресс, Body Battery, активность, тренировки, вес.
-Работает через официальный [Garmin Connect Personal API](https://developer.garmin.com/gc-developer-program/personal/personal-api/).
+[![CI](https://github.com/sasha-sup/garmin-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/sasha-sup/garmin-mcp/actions/workflows/ci.yml)
 
-Главный сценарий — персональные рекомендации по сну и самочувствию: сервер сам считает
-средние, регулярность режима, недосып, отклонения от личной нормы и связь сна с событиями дня,
-а Claude превращает это в конкретные советы.
+**English** | [Русский](README.ru.md)
 
-> **MCP** (Model Context Protocol) — стандарт, по которому AI-ассистент вызывает внешние
-> инструменты. Claude Code запускает `garmin-mcp` как дочерний процесс и общается с ним
-> через stdin/stdout.
+An MCP server that gives Claude (or any other MCP client) **read-only** access to your own
+Garmin Connect data: sleep, HRV, heart rate, stress, Body Battery, daily activity, workouts and weight.
+It uses the official [Garmin Connect Personal API](https://developer.garmin.com/gc-developer-program/personal/personal-api/).
 
-## Быстрый старт
+The main use case is personal advice on sleep and wellbeing. The server computes averages, sleep
+regularity, sleep shortfall, deviations from your own baseline and links between your day and your
+sleep; Claude turns that into concrete recommendations.
 
-1. **Ключ API.** Откройте <https://connect.garmin.com/app/settings/personalApiToken> →
-   *Create Key* → примите условия → выберите срок (30, 90, 180 дней или 1 год) → скопируйте ключ.
-   Ключ показывается **один раз**. За неделю до истечения Garmin пришлёт письмо.
+> **MCP** (Model Context Protocol) is the standard an AI assistant uses to call external tools.
+> Claude Code starts `garmin-mcp` as a child process and talks to it over stdin/stdout.
 
-2. **Сборка** (нужен Go 1.27.4+; более старый Go сам скачает нужную версию):
+## Quick start
+
+1. **API key.** Open <https://connect.garmin.com/app/settings/personalApiToken> → *Create Key* →
+   accept the terms → choose an expiry (30, 90, 180 days or 1 year) → copy the key.
+   The key is shown **once**. Garmin emails you about a week before it expires.
+
+2. **Build** (Go 1.27.4+; an older Go 1.21+ downloads the right toolchain automatically):
 
    ```sh
-   make build            # бинарник в bin/garmin-mcp
+   make build            # binary in bin/garmin-mcp
    ```
 
-3. **Настройка:**
+3. **Configure:**
 
    ```sh
    cp .env.example .env
-   chmod 600 .env        # ключ читает только ваш пользователь
-   $EDITOR .env          # вписать GARMIN_API_KEY и GARMIN_TZ
+   chmod 600 .env        # only your user can read the key
+   $EDITOR .env          # set GARMIN_API_KEY and GARMIN_TZ
    ```
 
-4. **Проверка:**
+4. **Check:**
 
    ```sh
    ./bin/garmin-mcp -env-file .env -check
@@ -41,129 +44,146 @@ MCP-сервер, который даёт Claude (или другому MCP-кл
    # data ok: 7 of the last 7 days have a daily summary
    ```
 
-5. **Подключение к Claude Code** (для всех проектов — `-s user`):
+5. **Connect to Claude Code** (for all projects: `-s user`):
 
    ```sh
    claude mcp add -s user garmin -- "$PWD/bin/garmin-mcp" -env-file "$PWD/.env"
    ```
 
-   Claude Desktop: в `claude_desktop_config.json`
+   Claude Desktop, in `claude_desktop_config.json`:
 
    ```json
    {
      "mcpServers": {
        "garmin": {
-         "command": "/абсолютный/путь/bin/garmin-mcp",
-         "args": ["-env-file", "/абсолютный/путь/.env"]
+         "command": "/absolute/path/bin/garmin-mcp",
+         "args": ["-env-file", "/absolute/path/.env"]
        }
      }
    }
    ```
 
-6. **Спросите Claude**, например:
-   - «Проанализируй мой сон за последний месяц и дай рекомендации»
-   - «Как я восстановился сегодня? Можно тренироваться интенсивно?»
-   - «Как менялись пульс покоя и HRV за полгода?»
-   - «От чего у меня хуже сон — от стресса или поздних тренировок?»
+6. **Ask Claude**, for example:
+   - "Analyse my sleep over the last month and give me recommendations"
+   - "How recovered am I today? Is a hard workout a good idea?"
+   - "How have my resting heart rate and HRV changed over six months?"
+   - "What hurts my sleep more: stress or late workouts?"
 
-   Или запустите готовый prompt: в Claude Code это `/mcp__garmin__sleep_review`,
-   `/mcp__garmin__wellbeing_review`, `/mcp__garmin__readiness_check` (можно передать число дней).
+   Or run a ready-made prompt. In Claude Code they are `/mcp__garmin__sleep_review`,
+   `/mcp__garmin__wellbeing_review` and `/mcp__garmin__readiness_check` (optionally with a number of days).
 
-## Инструменты
+## Tools
 
-| Tool | Что отдаёт | Период |
+| Tool | Returns | Period |
 |---|---|---|
-| `garmin_sleep_analysis` | Анализ сна: средняя длительность против базовой потребности Garmin и недобор за неделю, медианное время засыпания/подъёма и их разброс, сдвиг режима в выходные (social jetlag), доли фаз, тренд sleep score, пульс/HRV/SpO2/дыхание во сне, **факторы** предыдущего дня (стресс выше вашего обычного, поздние и тяжёлые тренировки, мало шагов, позднее засыпание → score, HRV и пульс во сне с ними и без; разница показывается только при ≥ 5 ночах в каждой группе) | до 366 дней, по умолчанию 28 |
-| `garmin_sleep` | По ночам: отбой, подъём, фазы, score и подоценки, пульс, стресс, SpO2, дыхание, потребность во сне, отзыв Garmin | до 366, 7 |
-| `garmin_recovery_status` | Снимок готовности на день: сон; HRV, пульс покоя, пульс во сне, дыхание и вчерашний стресс — каждый против **вашей** нормы за предыдущие 28 дней (среднее, SD, z-score, сколько дней истории); зарядка Body Battery за ночь; нагрузка 7 против 28 дней; список сигналов и описание метода. Сигналы относительно нормы выдаются только при ≥ 14 днях истории | 1 день |
-| `garmin_trends` | Средние по неделям или месяцам: пульс покоя, HRV, сон, шаги, стресс, Body Battery, минуты интенсивности, тренировки, нагрузка, вес | до 731 дня, 84 |
-| `garmin_daily_summary` | По дням: шаги, дистанция, калории, пульс, минуты интенсивности, стресс, Body Battery, дыхание, SpO2 | до 366, 7 |
-| `garmin_hrv` | HRV за ночь, 7-дневное среднее, личный коридор нормы, статус Garmin | до 366, 14 |
-| `garmin_body_battery` | Заряд/расход, мин/макс, события (сон, тренировки), отзыв Garmin, опционально график за день | до 31, 3 |
-| `garmin_heart_rate` | Пульс за день по интервалам местного времени (5, 10, 15, 20, 30, 60, 120, 180, 240 мин) | 1 день |
-| `garmin_activities` | Тренировки: тип, длительность, дистанция, темп/скорость, пульс, время в зонах, нагрузка, training effect, VO2max | по умолчанию 30 дней, до 100 шт. |
-| `garmin_activity` | Полная сводка одной тренировки | — |
-| `garmin_profile` | Часовой пояс, пульсовые зоны, Fitness Age, последний вес | — |
-| `garmin_weight` | Взвешивания: вес, ИМТ, % жира, мышцы, вода | до 731, 90 |
-| `garmin_api_get` | Сырой JSON разрешённого эндпоинта (SpO2 по часам, стресс и шаги по дням, гидратация и т.д.), обрезается на 100 КБ. Питание и менструальный цикл — только с `GARMIN_ALLOW_SENSITIVE=1` | — |
+| `garmin_sleep_analysis` | Sleep analysis: average duration vs Garmin's baseline sleep need and weekly shortfall, median sleep onset and wake time and their spread, weekday/weekend shift (social jetlag), stage shares, sleep score trend, sleep heart rate/HRV/SpO2/breathing, and **factors** from the previous day (stress above your usual, late or hard workouts, low step count, late sleep onset → score, HRV and sleep heart rate with and without; differences are shown only with ≥ 5 nights in each group) | up to 366 days, default 28 |
+| `garmin_sleep` | Per night: bedtime, wake time, stages, score and sub-scores, heart rate, stress, SpO2, breathing, sleep need, Garmin's feedback | up to 366, 7 |
+| `garmin_recovery_status` | One-day readiness snapshot: sleep; HRV, resting HR, sleep HR, breathing rate and yesterday's stress each compared with **your own** previous 28 days (mean, SD, z-score, days of history); overnight Body Battery charge; training load of the last 7 vs 28 days; plain-language signals and the method used. Baseline-relative signals need ≥ 14 days of history | 1 day |
+| `garmin_trends` | Weekly or monthly averages: resting HR, HRV, sleep, steps, stress, Body Battery, intensity minutes, workouts, training load, weight | up to 731 days, 84 |
+| `garmin_daily_summary` | Per day: steps, distance, calories, heart rate, intensity minutes, stress, Body Battery, breathing, SpO2 | up to 366, 7 |
+| `garmin_hrv` | Overnight HRV, 7-day average, personal baseline band, Garmin status | up to 366, 14 |
+| `garmin_body_battery` | Charged/drained, min/max, events (sleep, workouts), Garmin's feedback, optional intraday timeline | up to 31, 3 |
+| `garmin_heart_rate` | Heart rate for one day in local-time intervals (5, 10, 15, 20, 30, 60, 120, 180, 240 min) | 1 day |
+| `garmin_activities` | Workouts: type, duration, distance, pace/speed, heart rate, time in zones, training load, training effect, VO2max | default 30 days, up to 100 items |
+| `garmin_activity` | Full summary of one workout | — |
+| `garmin_profile` | Time zone, heart rate zones, Fitness Age, latest weight | — |
+| `garmin_weight` | Weigh-ins: weight, BMI, body fat, muscle mass, body water | up to 731, 90 |
+| `garmin_api_get` | Raw JSON from an allow-listed endpoint (hourly SpO2, daily stress and steps, hydration, …), truncated at 100 KB. Nutrition and menstrual cycle only with `GARMIN_ALLOW_SENSITIVE=1` | — |
 
-Все даты — **локальные календарные** (`YYYY-MM-DD`). Сон записывается на дату **пробуждения**:
-ночь с 10 на 11 ноября — это `2026-11-11`.
+All dates are **local calendar dates** (`YYYY-MM-DD`). Sleep is filed under the **wake-up** date:
+the night from 10 to 11 November is `2026-11-11`.
 
-### Чего в API нет
+### Not in the API
 
-Personal API не отдаёт Training Readiness, Training Status, Acute Load и тренд VO2max.
-`garmin_recovery_status` считает похожие сигналы сам (HRV, пульс покоя, сон, сумма
-`activityTrainingLoad` за 7 и 28 дней) и прямо помечает, что это расчёт сервера, а не Garmin.
+The Personal API does not expose Training Readiness, Training Status, Acute Load or a VO2max trend.
+`garmin_recovery_status` computes comparable signals itself (HRV, resting HR, sleep, the sum of
+`activityTrainingLoad` over 7 and 28 days) and labels them as computed by this server, not by Garmin.
 
-## Настройки
+## Configuration
 
-| Переменная | Назначение | По умолчанию |
+| Variable | Purpose | Default |
 |---|---|---|
-| `GARMIN_API_KEY` (или `GARMIN_API`) | Personal API key | — (обязательно) |
-| `GARMIN_TZ` | Ваш часовой пояс IANA, например `Asia/Tbilisi`. Определяет, какой день «сегодня». `garmin_profile` предупредит, если он расходится с профилем Garmin | системный |
-| `GARMIN_CACHE_DIR` | Каталог кэша или `off` | `~/.cache/garmin-mcp` |
-| `GARMIN_REGION` | `global` или `cn` | `global` |
-| `GARMIN_LOG_LEVEL` | `debug`, `info`, `warn`, `error` (логи идут в stderr) | `info` |
-| `GARMIN_ALLOW_SENSITIVE` | `1` — разрешить в `garmin_api_get` эндпоинты питания и менструального цикла | выключено |
+| `GARMIN_API_KEY` (or `GARMIN_API`) | Personal API key | — (required) |
+| `GARMIN_TZ` | Your IANA time zone, e.g. `Asia/Tbilisi`. Decides what "today" is. `garmin_profile` warns if it differs from your Garmin profile | system zone |
+| `GARMIN_CACHE_DIR` | Cache directory, or `off` | `~/.cache/garmin-mcp` |
+| `GARMIN_REGION` | `global` or `cn` | `global` |
+| `GARMIN_LOG_LEVEL` | `debug`, `info`, `warn`, `error` (logs go to stderr) | `info` |
+| `GARMIN_ALLOW_SENSITIVE` | `1` enables the nutrition and menstrual-cycle endpoints in `garmin_api_get` | off |
 
-Флаги: `-env-file PATH` (переменные окружения важнее файла; в файле допустимы только `GARMIN_*`), `-check`, `-clear-cache`, `-version`.
+Flags: `-env-file PATH` (the environment wins over the file; the file may only set `GARMIN_*`), `-check`, `-clear-cache`, `-version`.
 
-## Как это работает
+## How it works
 
-- **Авторизация.** Ключ обменивается на access token (JWT, живёт 24 часа, refresh token нет):
-  `POST /personalapitoken-service/personal-api/personal-api-key/token` с заголовком
-  `Authorization: ApiKey <key>`. Дальше все запросы идут с `Authorization: Bearer <token>`.
-  Токен хранится только в памяти и обновляется за 5 минут до истечения, а также один раз при ответе 401.
-  Обновление выполняется одним запросом, остальные запросы его ждут, но не дольше собственного таймаута.
-- **Лимиты диапазонов.** Garmin отвечает `400` на слишком длинный период: сон и Body Battery —
-  31 день, стресс и шаги — 28, дневные сводки — 1 год. Сервер сам режет запрос на куски и
-  выполняет их параллельно (не больше 4 одновременно).
-- **Кэш.** Ответы раскладываются по дням в `GARMIN_CACHE_DIR`. День с данными, загруженный позже чем
-  через 72 часа после его окончания, считается окончательным и больше не запрашивается; более свежие
-  дни кэшируются на 10 минут, потому что часы досинхронизируют данные. День **без данных** (часы не
-  надевали или ещё не синхронизировали) перепроверяется раз в 6 часов и считается окончательным только
-  через 30 дней. Повторный анализ за год — это несколько запросов, а не сотни. Если часы долго не
-  синхронизировались и данные за прошлые дни пришли частично — `garmin-mcp -clear-cache`.
-- **Повторы.** При `429` и `5xx` — до 3 повторов с экспоненциальной паузой и учётом `Retry-After`.
-  Rate limit в документации Garmin не описан.
+- **Authentication.** The key is exchanged for an access token (a JWT valid for 24 hours; there is
+  no refresh token): `POST /personalapitoken-service/personal-api/personal-api-key/token` with
+  `Authorization: ApiKey <key>`. Every other request carries `Authorization: Bearer <token>`.
+  The token lives only in memory and is renewed 5 minutes before expiry, and once on HTTP 401.
+  One request performs the renewal; concurrent requests wait for it, but never longer than their own timeout.
+- **Range limits.** Garmin answers `400` when a period is too long: sleep and Body Battery 31 days,
+  stress and steps 28, daily summaries 1 year. The server splits requests into chunks and runs
+  them in parallel (at most 4 at a time).
+- **Cache.** Responses are stored per day in `GARMIN_CACHE_DIR`. A day with data that was fetched
+  more than 72 hours after it ended is final and never requested again; more recent days are cached
+  for 10 minutes because the watch keeps syncing. A day **without data** (watch not worn or not
+  synced yet) is re-checked every 6 hours and becomes final only after 30 days. Re-analysing a year
+  costs a handful of requests, not hundreds. If the watch synced very late and past days came in
+  partially, run `garmin-mcp -clear-cache`.
+- **Retries.** On `429` and `5xx`: up to 3 retries with exponential backoff, honouring `Retry-After`.
+  Garmin does not document a rate limit.
 
-## Приватность и безопасность
+## Privacy and security
 
-- Сервер **только читает**: в API нет методов записи, все инструменты помечены `readOnlyHint`.
-- Ключ и токен отправляются только на хост Garmin; редиректы не выполняются, поэтому ключ не уйдёт
-  на чужой адрес. В логах и сообщениях об ошибках ключа и токена нет.
-- Кэш содержит медицинские данные: каталог `v1` внутри `GARMIN_CACHE_DIR` получает права `0700`, файлы — `0600`;
-  симлинки и слишком большие файлы в кэше игнорируются. Очистить: `garmin-mcp -clear-cache` или удалить каталог.
-- `-env-file` принимает только переменные `GARMIN_*`: подменённый файл не сможет задать `HTTPS_PROXY`
-  или `SSL_CERT_FILE` и перехватить ключ.
-- Данные о питании и менструальном цикле не уходят модели, пока вы явно не включите `GARMIN_ALLOW_SENSITIVE=1`.
-- Данные, которые Claude получает от инструментов, уходят в Anthropic вместе с контекстом диалога.
-- `.env` и `*.db` в `.gitignore`. Если ключ утёк — удалите его на странице Personal API Key;
-  вместе с ним перестанут работать все выданные по нему токены.
-- Рекомендации на основе этих данных — не медицинская консультация.
+- The server **only reads**: the API has no write methods and every tool is marked `readOnlyHint`.
+- The key and token are sent only to Garmin's host; redirects are not followed, so the key cannot
+  leak to another address. Logs and error messages never contain the key or token.
+- The cache holds health data: the `v1` directory inside `GARMIN_CACHE_DIR` gets mode `0700`, files
+  `0600`; symlinks and oversized files in the cache are ignored. Clear it with `garmin-mcp -clear-cache`
+  or by deleting the directory.
+- `-env-file` accepts only `GARMIN_*` variables, so a tampered file cannot set `HTTPS_PROXY` or
+  `SSL_CERT_FILE` to intercept the key.
+- Nutrition and menstrual-cycle data never reach the model unless you set `GARMIN_ALLOW_SENSITIVE=1`.
+- Whatever the tools return is sent to the model provider (Anthropic for Claude) as part of the conversation.
+- `.env` and `*.db` are in `.gitignore`. If the key leaks, delete it on the Personal API Key page;
+  every token issued for it stops working too.
+- Recommendations based on this data are not medical advice.
 
-## Разработка
+## Development
 
 ```sh
-make test    # юнит-тесты с -race на синтетическом фейковом Garmin (реальные данные не нужны)
+make test    # unit tests with -race against a synthetic fake Garmin API (no real data needed)
 make lint    # golangci-lint v2
 make vuln    # govulncheck
-make live    # все инструменты против настоящего API (нужен .env), печатает только размеры ответов
+make live    # every tool against the real API (needs .env); prints response sizes only
 make all     # lint + test + vuln + build
+make ci-lint # validate the GitHub Actions workflows (actionlint)
 ```
 
-Структура:
+### CI
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on pushes to `main`, on pull requests, weekly
+(new vulnerabilities appear without code changes) and on demand:
+
+| Job | What it does |
+|---|---|
+| Lint | `go mod tidy` leaves `go.mod`/`go.sum` unchanged; golangci-lint v2.15.0 with `.golangci.yml` |
+| Test | `go vet`, `go test -race` with coverage on Ubuntu and macOS, builds the binary |
+| Vulnerability scan | `govulncheck` over the code and its dependencies |
+
+Actions are pinned to commit SHAs, the workflow has only `contents: read`, and checkout does not
+persist the token. Dependabot proposes Go module and action updates weekly. The live test against
+the real API does not run in CI: no key is given to CI.
+
+Layout:
 
 ```
-cmd/garmin-mcp/      точка входа: флаги, конфиг, запуск stdio-сервера
-internal/config/     переменные окружения и .env
-internal/garmin/     HTTP-клиент (токен, повторы, лимиты), модели ответов, сервис с кэшем и нарезкой диапазонов
-internal/cache/      файловый кэш с атомарной записью
-internal/tools/      MCP-инструменты, анализ сна и восстановления, prompts
-internal/civil/      календарная дата без времени
+cmd/garmin-mcp/      entry point: flags, config, stdio server
+internal/config/     environment and .env loading
+internal/garmin/     HTTP client (token, retries, limits), response models, cached range-aware service
+internal/cache/      file cache with atomic writes
+internal/tools/      MCP tools, sleep and recovery analysis, prompts
+internal/civil/      calendar date without time
 ```
 
-Официальная OpenAPI-спека Garmin встроена в страницу
-<https://developer.garmin.com/gc-developer-program/personal/swagger-docs/>; форматы ответов в
-`internal/garmin/models.go` сверены с живыми ответами API (ноябрь 2026).
+Garmin's official OpenAPI spec is embedded in
+<https://developer.garmin.com/gc-developer-program/personal/swagger-docs/>; the response formats in
+`internal/garmin/models.go` were checked against live API responses (November 2026).
