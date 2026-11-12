@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -169,7 +170,7 @@ type ActivityDetailOut struct {
 
 func (h *handlers) activity(ctx context.Context, _ *mcp.CallToolRequest, in ActivityInput) (*mcp.CallToolResult, ActivityDetailOut, error) {
 	if in.ActivityID <= 0 {
-		return nil, ActivityDetailOut{}, fmt.Errorf("activity_id must be a positive number")
+		return nil, ActivityDetailOut{}, errors.New("activity_id must be a positive number")
 	}
 	d, err := h.svc.Activity(ctx, in.ActivityID)
 	if err != nil {

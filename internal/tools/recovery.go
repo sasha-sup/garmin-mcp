@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -77,218 +77,231 @@ func (h *handlers) recoveryStatus(ctx context.Context, _ *mcp.CallToolRequest, i
 	if day.After(h.svc.Today()) {
 		return nil, RecoveryOut{}, fmt.Errorf("date %s is in the future", day)
 	}
-	from, prior := day.AddDays(-baselineDays), day.AddDays(-1)
-
-	var (
-		wg                            sync.WaitGroup
-		sleep                         map[string]garmin.DailySleep
-		hrv                           map[string]garmin.HRVSummary
-		sums                          map[string]garmin.DailySummary
-		bb                            map[string]garmin.BodyBatteryReport
-		acts                          []garmin.Activity
-		eSleep, eHRV, eSum, eBB, eAct error
-	)
-	wg.Go(func() { sleep, eSleep = h.svc.Sleep(ctx, from, day) })
-	wg.Go(func() { hrv, eHRV = h.svc.HRV(ctx, from, day) })
-	wg.Go(func() { sums, eSum = h.svc.DailySummaries(ctx, from, day) })
-	wg.Go(func() { bb, eBB = h.svc.BodyBattery(ctx, day, day) })
-	wg.Go(func() { acts, eAct = h.svc.Activities(ctx, from, prior, "", "", 500) })
-	wg.Wait()
-	for _, e := range []error{eSleep, eHRV, eSum, eBB, eAct} {
-		if e != nil {
-			return nil, RecoveryOut{}, e
-		}
+	d, err := h.loadRecovery(ctx, day)
+	if err != nil {
+		return nil, RecoveryOut{}, err
 	}
 
 	out := RecoveryOut{
 		Date:           day.String(),
-		BaselineWindow: from.String() + ".." + prior.String(),
+		BaselineWindow: d.from.String() + ".." + d.prior.String(),
 		Signals:        []string{},
 		Method:         recoveryMethod,
 	}
-	key := day.String()
-	signal := func(format string, a ...any) { out.Signals = append(out.Signals, fmt.Sprintf(format, a...)) }
-	missing := func(s string) { out.Missing = append(out.Missing, s) }
+	d.addSleep(&out)
+	hrvBelowBand := d.addHRV(&out)
+	d.addRestingHRAndStress(&out)
+	addStrainMarkers(&out, hrvBelowBand)
+	d.addBodyBattery(&out, h.svc.Location())
+	if out.Load = trainingLoad(d.acts, d.from, day); out.Load != nil {
+		out.signal("%s", loadSignal(out.Load))
+	}
+	finishRecovery(&out)
+	return nil, out, nil
+}
 
-	// history collects a metric over the baseline window (excluding day).
-	history := func(get func(d string) *float64) []float64 {
-		var v []float64
-		for _, d := range civil.Range(from, prior) {
-			if x := get(d.String()); x != nil {
-				v = append(v, *x)
-			}
-		}
-		return v
-	}
-	rhrOf := func(d string) *float64 {
-		if s, ok := sums[d]; ok {
-			return intToF(s.HeartRate.RestingValue)
-		}
-		return nil
-	}
-	stressOf := func(d string) *float64 {
-		if s, ok := sums[d]; ok {
-			return intToF(s.Stress.AvgLevel)
-		}
-		return nil
-	}
-	sleepHROf := func(d string) *float64 {
-		if s, ok := sleep[d]; ok {
-			return s.AvgHeartRate
-		}
-		return nil
-	}
-	respOf := func(d string) *float64 {
-		if s, ok := sleep[d]; ok {
-			return s.AverageRespirationValue
-		}
-		return nil
-	}
-	hrvOf := func(d string) *float64 {
-		if v, ok := hrv[d]; ok {
-			return intToF(v.LastNightAvg)
-		}
-		return nil
-	}
+// recoveryData is everything one snapshot needs: the day plus its 28-day baseline window.
+type recoveryData struct {
+	day, from, prior civil.Date
+	sleep            map[string]garmin.DailySleep
+	hrv              map[string]garmin.HRVSummary
+	sums             map[string]garmin.DailySummary
+	bb               map[string]garmin.BodyBatteryReport
+	acts             []garmin.Activity
+}
 
-	// Sleep.
-	if s, ok := sleep[key]; ok && s.SleepTimeSeconds != nil && *s.SleepTimeSeconds > 0 {
+func (h *handlers) loadRecovery(ctx context.Context, day civil.Date) (*recoveryData, error) {
+	d := &recoveryData{day: day, from: day.AddDays(-baselineDays), prior: day.AddDays(-1)}
+	err := fetchAll(
+		func() (err error) { d.sleep, err = h.svc.Sleep(ctx, d.from, day); return },
+		func() (err error) { d.hrv, err = h.svc.HRV(ctx, d.from, day); return },
+		func() (err error) { d.sums, err = h.svc.DailySummaries(ctx, d.from, day); return },
+		func() (err error) { d.bb, err = h.svc.BodyBattery(ctx, day, day); return },
+		func() (err error) {
+			d.acts, err = h.svc.Activities(ctx, d.from, d.prior, "", "", maxActivitiesPerAnalysis)
+			return
+		},
+	)
+	return d, err
+}
+
+// Per-day accessors. Missing days are zero structs, so they yield nil.
+func (d *recoveryData) rhr(day string) *float64     { return intToF(d.sums[day].HeartRate.RestingValue) }
+func (d *recoveryData) stress(day string) *float64  { return intToF(d.sums[day].Stress.AvgLevel) }
+func (d *recoveryData) sleepHR(day string) *float64 { return d.sleep[day].AvgHeartRate }
+func (d *recoveryData) resp(day string) *float64    { return d.sleep[day].AverageRespirationValue }
+func (d *recoveryData) hrvMs(day string) *float64   { return intToF(d.hrv[day].LastNightAvg) }
+
+// metric compares get(at) with get over the baseline window.
+func (d *recoveryData) metric(at civil.Date, get func(string) *float64, places int) Metric {
+	var history []float64
+	for _, day := range civil.Range(d.from, d.prior) {
+		if x := get(day.String()); x != nil {
+			history = append(history, *x)
+		}
+	}
+	return newMetric(get(at.String()), history, places)
+}
+
+// signal adds a formatted signal; an empty result is ignored.
+func (o *RecoveryOut) signal(format string, a ...any) {
+	if msg := fmt.Sprintf(format, a...); msg != "" {
+		o.Signals = append(o.Signals, msg)
+	}
+}
+
+func (o *RecoveryOut) missing(what string) { o.Missing = append(o.Missing, what) }
+
+func (d *recoveryData) addSleep(out *RecoveryOut) {
+	if s := d.sleep[d.day.String()]; s.SleepTimeSeconds != nil && *s.SleepTimeSeconds > 0 {
 		so := sleepOut(s)
 		out.Sleep = &so
 		if *so.SleepHours < 6 {
-			signal("short sleep: %.1f h", *so.SleepHours)
+			out.signal("short sleep: %.1f h", *so.SleepHours)
 		}
 		if so.Score != nil && *so.Score < 60 {
-			signal("poor sleep score: %.0f", *so.Score)
+			out.signal("poor sleep score: %.0f", *so.Score)
 		}
 	} else {
-		missing("last night's sleep (not recorded or not synced yet)")
+		out.missing("last night's sleep (not recorded or not synced yet)")
 	}
-	out.SleepHR = newMetric(sleepHROf(key), history(sleepHROf), 0)
-	out.Respiration = newMetric(respOf(key), history(respOf), 1)
+	out.SleepHR = d.metric(d.day, d.sleepHR, 0)
+	out.Respiration = d.metric(d.day, d.resp, 1)
+}
 
-	// HRV.
-	hrvBelowBand := false
-	if v, ok := hrv[key]; ok && v.LastNightAvg != nil {
-		r := &RecoveryHRV{LastNight: v.LastNightAvg, WeeklyAvg: v.WeeklyAvg, Status: v.Status,
-			Personal: newMetric(hrvOf(key), history(hrvOf), 0)}
-		if v.Baseline != nil {
-			r.BaselineLow, r.BaselineHigh = v.Baseline.BalancedLow, v.Baseline.BalancedUpper
-		}
-		out.HRV = r
-		if r.BaselineLow != nil && *r.LastNight < *r.BaselineLow {
-			hrvBelowBand = true
-			signal("HRV below your Garmin baseline band: %d ms vs %d-%d ms", *r.LastNight, *r.BaselineLow, deref(r.BaselineHigh))
-		}
-		if statusFlags[v.Status] {
-			signal("Garmin HRV status: %s", v.Status)
-		}
-	} else {
-		missing("last night's HRV")
+// addHRV reports whether last night's HRV is below Garmin's baseline band.
+func (d *recoveryData) addHRV(out *RecoveryOut) bool {
+	v := d.hrv[d.day.String()]
+	if v.LastNightAvg == nil {
+		out.missing("last night's HRV")
+		return false
 	}
+	r := &RecoveryHRV{LastNight: v.LastNightAvg, WeeklyAvg: v.WeeklyAvg, Status: v.Status,
+		Personal: d.metric(d.day, d.hrvMs, 0)}
+	if v.Baseline != nil {
+		r.BaselineLow, r.BaselineHigh = v.Baseline.BalancedLow, v.Baseline.BalancedUpper
+	}
+	out.HRV = r
+	below := r.BaselineLow != nil && *r.LastNight < *r.BaselineLow
+	if below {
+		out.signal("HRV below your Garmin baseline band: %d ms vs %d-%d ms", *r.LastNight, *r.BaselineLow, deref(r.BaselineHigh))
+	}
+	if statusFlags[v.Status] {
+		out.signal("Garmin HRV status: %s", v.Status)
+	}
+	return below
+}
 
-	// Resting heart rate.
-	out.RestingHR = newMetric(rhrOf(key), history(rhrOf), 0)
+func (d *recoveryData) addRestingHRAndStress(out *RecoveryOut) {
+	out.RestingHR = d.metric(d.day, d.rhr, 0)
 	if out.RestingHR.Value == nil {
-		missing("today's resting HR (usually appears after the watch syncs)")
-	} else if d, ok := out.RestingHR.delta(); ok && (d >= 5 || out.RestingHR.zAtLeast(1.5)) {
-		signal("resting HR above your usual: +%.0f bpm vs your 28-day mean", d)
+		out.missing("today's resting HR (usually appears after the watch syncs)")
+	} else if delta, ok := out.RestingHR.delta(); ok && (delta >= 5 || out.RestingHR.zAtLeast(1.5)) {
+		out.signal("resting HR above your usual: +%.0f bpm vs your 28-day mean", delta)
 	}
-
-	// Stress yesterday.
-	out.StressYesterday = newMetric(stressOf(prior.String()), history(stressOf), 0)
+	out.StressYesterday = d.metric(d.prior, d.stress, 0)
 	if out.StressYesterday.zAtLeast(1) {
-		signal("yesterday's stress above your usual: average %.0f vs your mean %.0f", *out.StressYesterday.Value, *out.StressYesterday.Mean)
+		out.signal("yesterday's stress above your usual: average %.0f vs your mean %.0f", *out.StressYesterday.Value, *out.StressYesterday.Mean)
 	}
+}
 
-	// Several strain markers at once.
+func addStrainMarkers(out *RecoveryOut, hrvBelowBand bool) {
+	respUp := false
+	if delta, ok := out.Respiration.delta(); ok && delta >= 1 {
+		respUp = true
+	}
 	var markers []string
-	if hrvBelowBand {
-		markers = append(markers, "HRV below band")
-	}
-	if out.RestingHR.zAtLeast(1) {
-		markers = append(markers, "resting HR up")
-	}
-	if out.SleepHR.zAtLeast(1) {
-		markers = append(markers, "sleep HR up")
-	}
-	if d, ok := out.Respiration.delta(); ok && d >= 1 {
-		markers = append(markers, "breathing rate up")
+	for _, m := range []struct {
+		on   bool
+		name string
+	}{
+		{hrvBelowBand, "HRV below band"},
+		{out.RestingHR.zAtLeast(1), "resting HR up"},
+		{out.SleepHR.zAtLeast(1), "sleep HR up"},
+		{respUp, "breathing rate up"},
+	} {
+		if m.on {
+			markers = append(markers, m.name)
+		}
 	}
 	if len(markers) >= 2 {
-		signal("%d strain markers together (%s): a pattern seen with illness onset, hard training, alcohol, heat or poor recovery; an easy day is reasonable",
+		out.signal("%d strain markers together (%s): a pattern seen with illness onset, hard training, alcohol, heat or poor recovery; an easy day is reasonable",
 			len(markers), strings.Join(markers, ", "))
 	}
+}
 
-	// Body Battery. The SLEEP event of the night before day D is in day D's report.
-	if r, ok := bb[key]; ok {
-		o := bbOut(r, h.svc.Location(), false)
-		b := &RecoveryBB{Max: o.Max, Latest: o.Latest}
-		for _, e := range o.Events {
-			if e.Type == "SLEEP" && e.Impact != nil {
-				b.SleepCharge = e.Impact
-			}
-		}
-		out.BodyBattery = b
-		if b.SleepCharge != nil && *b.SleepCharge < 30 {
-			signal("weak overnight recharge: Body Battery +%d", *b.SleepCharge)
-		}
-	} else {
-		missing("today's Body Battery")
+// addBodyBattery uses day D's report, which holds the SLEEP event of the night before D.
+func (d *recoveryData) addBodyBattery(out *RecoveryOut, loc *time.Location) {
+	r, ok := d.bb[d.day.String()]
+	if !ok {
+		out.missing("today's Body Battery")
+		return
 	}
+	o := bbOut(r, loc, false)
+	b := &RecoveryBB{Max: o.Max, Latest: o.Latest}
+	for _, e := range o.Events {
+		if e.Type == "SLEEP" && e.Impact != nil {
+			b.SleepCharge = e.Impact
+		}
+	}
+	out.BodyBattery = b
+	if b.SleepCharge != nil && *b.SleepCharge < 30 {
+		out.signal("weak overnight recharge: Body Battery +%d", *b.SleepCharge)
+	}
+}
 
-	// Training load over completed days.
-	var acute, total float64
-	weeks := [4]float64{}
+// trainingLoad sums Garmin per-activity load per week over the 28 completed
+// days before day. It returns nil when there was no load at all.
+func trainingLoad(acts []garmin.Activity, from, day civil.Date) *RecoveryLoad {
+	var weeks [4]float64 // 0 = the last 7 days
+	prior := day.AddDays(-1)
 	for _, a := range acts {
-		if a.ActivityTrainingLoad == nil {
-			continue
-		}
 		d, err := civil.Parse(firstN(a.StartTimeLocal, 10))
-		if err != nil || d.Before(from) || !d.Before(day) {
+		if a.ActivityTrainingLoad == nil || err != nil || d.Before(from) || !d.Before(day) {
 			continue
 		}
-		total += *a.ActivityTrainingLoad
-		w := d.DaysUntil(prior) / 7 // 0 = last 7 days
-		if w >= 0 && w < 4 {
-			weeks[w] += *a.ActivityTrainingLoad
-		}
-		if w == 0 {
-			acute += *a.ActivityTrainingLoad
+		weeks[d.DaysUntil(prior)/7] += *a.ActivityTrainingLoad
+	}
+	total := weeks[0] + weeks[1] + weeks[2] + weeks[3]
+	if total == 0 {
+		return nil
+	}
+	l := &RecoveryLoad{Acute7d: round(weeks[0], 0), ChronicWeekly: round(total/4, 0),
+		Note: "Sum of Garmin per-activity training load; an approximation, Garmin's Acute Load is not in this API."}
+	for _, w := range weeks {
+		if w > 0 {
+			l.ActiveWeeks++
 		}
 	}
-	if total > 0 {
-		l := &RecoveryLoad{Acute7d: round(acute, 0), ChronicWeekly: round(total/4, 0),
-			Note: "Sum of Garmin per-activity training load; an approximation, Garmin's Acute Load is not in this API."}
-		for _, w := range weeks {
-			if w > 0 {
-				l.ActiveWeeks++
-			}
-		}
-		if l.ActiveWeeks >= 3 {
-			r := round(acute/(total/4), 2)
-			l.Ratio = &r
-			switch {
-			case r > 1.5:
-				signal("training load sharply above your usual: last 7 days = %.2f x your 4-week weekly average", r)
-			case r < 0.8:
-				signal("training load lower than usual (%.2f x): a rest or taper week, or reduced training", r)
-			}
-		} else {
-			l.Note += " Ratio omitted: training in fewer than 3 of the last 4 weeks."
-		}
-		out.Load = l
+	if l.ActiveWeeks < 3 {
+		l.Note += " Ratio omitted: training in fewer than 3 of the last 4 weeks."
+		return l
 	}
+	l.Ratio = new(round(weeks[0]/(total/4), 2))
+	return l
+}
 
+func loadSignal(l *RecoveryLoad) string {
+	switch {
+	case l.Ratio == nil:
+		return ""
+	case *l.Ratio > 1.5:
+		return fmt.Sprintf("training load sharply above your usual: last 7 days = %.2f x your 4-week weekly average", *l.Ratio)
+	case *l.Ratio < 0.8:
+		return fmt.Sprintf("training load lower than usual (%.2f x): a rest or taper week, or reduced training", *l.Ratio)
+	}
+	return ""
+}
+
+func finishRecovery(out *RecoveryOut) {
 	if out.RestingHR.N < minBaselineDays {
-		missing(fmt.Sprintf("personal baseline: only %d of 28 days have resting HR, so comparisons with your usual are skipped", out.RestingHR.N))
+		out.missing(fmt.Sprintf("personal baseline: only %d of 28 days have resting HR, so comparisons with your usual are skipped", out.RestingHR.N))
 	}
-	if len(out.Signals) == 0 {
-		if len(out.Missing) == 0 {
-			signal("no warning signals: metrics are within your usual range")
-		} else {
-			signal("no warning signals in the available data (see missing_data)")
-		}
+	switch {
+	case len(out.Signals) > 0:
+	case len(out.Missing) == 0:
+		out.signal("no warning signals: metrics are within your usual range")
+	default:
+		out.signal("no warning signals in the available data (see missing_data)")
 	}
-	return nil, out, nil
 }

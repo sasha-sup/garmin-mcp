@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -388,12 +387,16 @@ func (h *handlers) heartRate(ctx context.Context, _ *mcp.CallToolRequest, in Hea
 	}
 	out.RestingHR, out.RestingHR7d, out.MinHR, out.MaxHR = d.RestingHeartRate, d.LastSevenDaysAvgRHR, d.MinHeartRate, d.MaxHeartRate
 
-	// Bucket by local wall-clock minute since midnight, so buckets and labels
-	// stay aligned on DST days (a repeated hour folds into the same bucket).
-	loc := h.svc.Location()
+	out.Series = hrBuckets(d.HeartRateValues, day, h.svc.Location(), iv)
+	return nil, out, nil
+}
+
+// hrBuckets aggregates samples into intervals of local wall-clock time, so
+// buckets stay aligned on DST days (a repeated hour folds into one bucket).
+func hrBuckets(values [][]*float64, day civil.Date, loc *time.Location, iv int) []HRBucket {
 	type acc struct{ sum, n, min, max int }
-	buckets := map[int]*acc{}
-	for _, v := range d.HeartRateValues {
+	buckets := make([]acc, 1440/iv)
+	for _, v := range values {
 		if len(v) < 2 || v[0] == nil || v[1] == nil || *v[1] <= 0 {
 			continue
 		}
@@ -401,31 +404,22 @@ func (h *handlers) heartRate(ctx context.Context, _ *mcp.CallToolRequest, in Hea
 		if !civil.Of(t).Equal(day) {
 			continue
 		}
-		bpm := int(*v[1])
-		key := (t.Hour()*60 + t.Minute()) / iv
-		b, ok := buckets[key]
-		if !ok {
-			b = &acc{min: bpm, max: bpm}
-			buckets[key] = b
+		bpm, b := int(*v[1]), &buckets[(t.Hour()*60+t.Minute())/iv]
+		if b.n == 0 {
+			b.min, b.max = bpm, bpm
 		}
 		b.sum += bpm
 		b.n++
 		b.min, b.max = min(b.min, bpm), max(b.max, bpm)
 	}
-	keys := make([]int, 0, len(buckets))
-	for k := range buckets {
-		keys = append(keys, k)
+	series := []HRBucket{}
+	for i, b := range buckets {
+		if b.n > 0 {
+			m := i * iv
+			series = append(series, HRBucket{Start: fmt.Sprintf("%02d:%02d", m/60, m%60), Avg: (b.sum + b.n/2) / b.n, Min: b.min, Max: b.max})
+		}
 	}
-	slices.Sort(keys)
-	for _, k := range keys {
-		b := buckets[k]
-		m := k * iv
-		out.Series = append(out.Series, HRBucket{
-			Start: fmt.Sprintf("%02d:%02d", m/60, m%60),
-			Avg:   (b.sum + b.n/2) / b.n, Min: b.min, Max: b.max,
-		})
-	}
-	return nil, out, nil
+	return series
 }
 
 // --- garmin_weight ---

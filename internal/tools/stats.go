@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"cmp"
 	"fmt"
 	"math"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/sasha-sup/garmin-mcp/internal/garmin"
@@ -14,6 +16,9 @@ import (
 const (
 	baselineDays    = 28
 	minBaselineDays = 14
+
+	// maxActivitiesPerAnalysis bounds activity paging for one analysis call.
+	maxActivitiesPerAnalysis = 1000
 )
 
 // Metric is a value compared with the user's own recent history.
@@ -143,4 +148,16 @@ func firstN(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// fetchAll runs fns concurrently and returns the first non-nil error in
+// argument order.
+func fetchAll(fns ...func() error) error {
+	errs := make([]error, len(fns))
+	var wg sync.WaitGroup
+	for i, f := range fns {
+		wg.Go(func() { errs[i] = f() })
+	}
+	wg.Wait()
+	return cmp.Or(errs...)
 }

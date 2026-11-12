@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -88,7 +87,8 @@ type SleepFactor struct {
 type night struct {
 	date      civil.Date
 	s         SleepOut
-	onset     float64 // minutes since 18:00 local
+	needMin   *float64 // Garmin's baseline sleep need
+	onset     float64  // minutes since 18:00 local
 	wake      float64
 	hasTiming bool
 	hrv       *float64
@@ -99,39 +99,135 @@ func (h *handlers) sleepAnalysis(ctx context.Context, _ *mcp.CallToolRequest, in
 	if err != nil {
 		return nil, SleepAnalysisOut{}, err
 	}
-	prev := from.AddDays(-1) // the day before the first night
 	var (
-		wg                       sync.WaitGroup
-		sleep                    map[string]garmin.DailySleep
-		hrv                      map[string]garmin.HRVSummary
-		sums                     map[string]garmin.DailySummary
-		acts                     []garmin.Activity
-		eSleep, eHRV, eSum, eAct error
+		sleep map[string]garmin.DailySleep
+		hrv   map[string]garmin.HRVSummary
+		sums  map[string]garmin.DailySummary
+		acts  []garmin.Activity
 	)
-	wg.Go(func() { sleep, eSleep = h.svc.Sleep(ctx, from, to) })
-	wg.Go(func() { hrv, eHRV = h.svc.HRV(ctx, from, to) })
-	wg.Go(func() { sums, eSum = h.svc.DailySummaries(ctx, prev, to) })
-	wg.Go(func() { acts, eAct = h.svc.Activities(ctx, prev, to, "", "", 1000) })
-	wg.Wait()
-	for _, e := range []error{eSleep, eHRV, eSum, eAct} {
-		if e != nil {
-			return nil, SleepAnalysisOut{}, e
-		}
+	prev := from.AddDays(-1) // the day before the first night
+	err = fetchAll(
+		func() (err error) { sleep, err = h.svc.Sleep(ctx, from, to); return },
+		func() (err error) { hrv, err = h.svc.HRV(ctx, from, to); return },
+		func() (err error) { sums, err = h.svc.DailySummaries(ctx, prev, to); return },
+		func() (err error) {
+			acts, err = h.svc.Activities(ctx, prev, to, "", "", maxActivitiesPerAnalysis)
+			return
+		},
+	)
+	if err != nil {
+		return nil, SleepAnalysisOut{}, err
 	}
 
 	out := SleepAnalysisOut{From: from.String(), To: to.String(), Factors: []SleepFactor{},
 		Worst: []SleepOut{}, Best: []SleepOut{}, Notes: []string{}}
-
-	nights, avg := collectNights(sleep, hrv, sums, &out)
-	out.Nights = len(nights)
-	if out.Nights == 0 {
+	nights := buildNights(sleep, hrv)
+	if out.Nights = len(nights); out.Nights == 0 {
 		out.Notes = append(out.Notes, "no sleep recorded in this period")
 		return nil, out, nil
 	}
-	out.Averages = avg
+	out.Averages = sleepAverages(nights, sums)
+	out.StageShare = stageShare(nights)
+	out.Qualifiers = subScoreCounts(nights)
+	out.Regularity = regularity(nights)
+	out.ScoreTrend, out.ScoreTrendN = scoreTrend(nights, from)
+	out.Factors = sleepFactors(nights, sums, acts)
+	out.Worst, out.Best = worstBest(nights)
+	out.Notes = sleepNotes(out.Averages)
+	return nil, out, nil
+}
 
+// buildNights returns the nights with recorded sleep, oldest first.
+func buildNights(sleep map[string]garmin.DailySleep, hrv map[string]garmin.HRVSummary) []night {
+	var nights []night
+	for _, k := range sortedKeys(sleep) {
+		raw := sleep[k]
+		d, err := civil.Parse(k)
+		n := night{date: d, s: sleepOut(raw), hrv: intToF(hrv[k].LastNightAvg)}
+		if err != nil || n.s.SleepHours == nil {
+			continue
+		}
+		// Garmin's baseline need, not the adjusted "actual" need, which
+		// already adds extra need after short nights and would double count.
+		if raw.SleepNeed != nil && raw.SleepNeed.Baseline != nil && *raw.SleepNeed.Baseline > 0 {
+			n.needMin = intToF(raw.SleepNeed.Baseline)
+		}
+		n.onset, n.wake, n.hasTiming = sleepTiming(raw)
+		nights = append(nights, n)
+	}
+	return nights
+}
+
+func sleepAverages(nights []night, sums map[string]garmin.DailySummary) SleepAverages {
+	var a struct{ hours, need, vsNeed, score, awake, hr, rhr, hrv, stress, spo2, low, resp mean }
+	for _, n := range nights {
+		a.hours.add(n.s.SleepHours)
+		if n.needMin != nil {
+			a.need.add(new(*n.needMin / 60))
+			a.vsNeed.add(new(*n.s.SleepHours*60 - *n.needMin))
+		}
+		a.score.add(n.s.Score)
+		a.awake.addInt(n.s.AwakeCount)
+		a.hr.add(n.s.AvgHR)
+		a.stress.add(n.s.AvgStress)
+		a.spo2.add(n.s.AvgSpO2)
+		a.low.add(n.s.LowestSpO2)
+		a.resp.add(n.s.AvgRespiration)
+		a.hrv.add(n.hrv)
+		a.rhr.addInt(sums[n.date.String()].HeartRate.RestingValue)
+	}
+	avg := SleepAverages{
+		SleepHours: a.hours.value(2), SleepNeedHours: a.need.value(2), VsNeedMin: a.vsNeed.value(0),
+		Score: a.score.value(0), AwakeCount: a.awake.value(1), AvgHR: a.hr.value(0), RestingHR: a.rhr.value(0),
+		HRV: a.hrv.value(0), SleepStress: a.stress.value(0), SpO2: a.spo2.value(0), LowestSpO2: a.low.value(0),
+		Respiration: a.resp.value(1),
+	}
+	if avg.VsNeedMin != nil {
+		avg.WeeklyShortfallH = new(round(math.Max(0, -*avg.VsNeedMin)*7/60, 1))
+	}
+	return avg
+}
+
+// stageShare averages stage percentages over nights where all three stages were measured.
+func stageShare(nights []night) SleepStageShare {
+	var deep, light, rem mean
+	for _, n := range nights {
+		s := n.s
+		if s.DeepMin == nil || s.LightMin == nil || s.RemMin == nil {
+			continue
+		}
+		if total := float64(*s.DeepMin + *s.LightMin + *s.RemMin); total > 0 {
+			deep.add(new(float64(*s.DeepMin) / total * 100))
+			light.add(new(float64(*s.LightMin) / total * 100))
+			rem.add(new(float64(*s.RemMin) / total * 100))
+		}
+	}
+	return SleepStageShare{Deep: deep.value(0), Light: light.value(0), REM: rem.value(0), Nights: deep.n}
+}
+
+func subScoreCounts(nights []night) map[string]map[string]int {
+	var counts map[string]map[string]int
+	for _, n := range nights {
+		for name, q := range n.s.SubScores {
+			if counts == nil {
+				counts = map[string]map[string]int{}
+			}
+			if counts[name] == nil {
+				counts[name] = map[string]int{}
+			}
+			counts[name][q]++
+		}
+	}
+	return counts
+}
+
+func regularity(nights []night) SleepRegularity {
+	var r SleepRegularity
 	var onsets, wakes, workMid, freeMid []float64
 	for _, n := range nights {
+		if *n.s.SleepHours < 6 {
+			r.ShortNights++
+		}
 		if !n.hasTiming {
 			continue
 		}
@@ -144,141 +240,103 @@ func (h *handlers) sleepAnalysis(ctx context.Context, _ *mcp.CallToolRequest, in
 		}
 	}
 	if len(onsets) >= 3 {
-		out.Regularity.MedianOnset = clockFrom18(median(onsets))
-		out.Regularity.MedianWake = clockFrom18(median(wakes))
-		out.Regularity.OnsetSpreadMin = new(round(stddev(onsets), 0))
-		out.Regularity.WakeSpreadMin = new(round(stddev(wakes), 0))
+		r.MedianOnset, r.MedianWake = clockFrom18(median(onsets)), clockFrom18(median(wakes))
+		r.OnsetSpreadMin, r.WakeSpreadMin = new(round(stddev(onsets), 0)), new(round(stddev(wakes), 0))
 	}
 	if len(workMid) >= 2 && len(freeMid) >= 2 {
-		out.Regularity.SocialJetlagMin = new(round(math.Abs(median(freeMid)-median(workMid)), 0))
+		r.SocialJetlagMin = new(round(math.Abs(median(freeMid)-median(workMid)), 0))
 	}
+	return r
+}
 
-	// Score trend: least-squares slope per week, only with enough nights.
+// scoreTrend is the least-squares slope of the sleep score per week; it
+// needs at least 14 scored nights.
+func scoreTrend(nights []night, from civil.Date) (*float64, int) {
 	var xs, ys []float64
 	for _, n := range nights {
 		if n.s.Score != nil {
 			xs, ys = append(xs, float64(from.DaysUntil(n.date))), append(ys, *n.s.Score)
 		}
 	}
-	out.ScoreTrendN = len(xs)
-	if len(xs) >= 14 {
-		out.ScoreTrend = new(round(slope(xs, ys)*7, 1))
+	if len(xs) < 14 {
+		return nil, len(xs)
 	}
+	return new(round(slope(xs, ys)*7, 1)), len(xs)
+}
 
-	out.Factors = sleepFactors(nights, sums, acts, onsets)
-
+func worstBest(nights []night) (worst, best []SleepOut) {
 	scored := slices.DeleteFunc(slices.Clone(nights), func(n night) bool { return n.s.Score == nil })
 	slices.SortFunc(scored, func(a, b night) int { return cmp.Compare(*a.s.Score, *b.s.Score) })
-	k := min(3, len(scored)/2) // never list the same night as both worst and best
-	for i := range k {
-		out.Worst = append(out.Worst, scored[i].s)
-		out.Best = append(out.Best, scored[len(scored)-1-i].s)
+	worst, best = []SleepOut{}, []SleepOut{}
+	for i := range min(3, len(scored)/2) { // never list a night as both worst and best
+		worst = append(worst, scored[i].s)
+		best = append(best, scored[len(scored)-1-i].s)
 	}
+	return worst, best
+}
 
-	out.Notes = append(out.Notes,
+func sleepNotes(avg SleepAverages) []string {
+	notes := []string{
 		"Sleep stages, SpO2, HRV and breathing are wrist-sensor estimates: trust patterns over several nights, not single values.",
 		fmt.Sprintf("Factors compare nights after days with and without a condition; differences are shown only with >= %d nights on each side and are associations, not proof of cause. Daily stress includes the evening before sleep, so stress and sleep partly overlap.", minFactorNights),
 		"Approximate population references: adults 7-9 h of sleep; deep sleep ~13-23% and REM ~20-25% of sleep time. A bedtime spread under ~30 min is a common heuristic for regularity, not a clinical norm.",
-	)
-	if out.Averages.LowestSpO2 != nil && *out.Averages.LowestSpO2 < 88 {
-		out.Notes = append(out.Notes, "Average lowest overnight SpO2 is below 88%. Wrist SpO2 is noisy, but repeated low values together with snoring, gasping or daytime sleepiness are worth discussing with a doctor.")
 	}
-	return nil, out, nil
+	if avg.LowestSpO2 != nil && *avg.LowestSpO2 < 88 {
+		notes = append(notes, "Average lowest overnight SpO2 is below 88%. Wrist SpO2 is noisy, but repeated low values together with snoring, gasping or daytime sleepiness are worth discussing with a doctor.")
+	}
+	return notes
 }
 
-// collectNights builds per-night records and period averages.
-func collectNights(sleep map[string]garmin.DailySleep, hrv map[string]garmin.HRVSummary, sums map[string]garmin.DailySummary, out *SleepAnalysisOut) ([]night, SleepAverages) {
-	var nights []night
-	var a struct{ hours, need, vsNeed, score, awake, hr, rhr, hrv, stress, spo2, low, resp, deep, light, rem mean }
-	for _, k := range sortedKeys(sleep) {
-		raw := sleep[k]
-		so := sleepOut(raw)
-		if so.SleepHours == nil {
-			continue
-		}
-		d, err := civil.Parse(k)
-		if err != nil {
-			continue
-		}
-		n := night{date: d, s: so}
-		n.onset, n.wake, n.hasTiming = sleepTiming(raw)
-		if v, ok := hrv[k]; ok {
-			n.hrv = intToF(v.LastNightAvg)
-		}
-		nights = append(nights, n)
-
-		a.hours.add(so.SleepHours)
-		// Garmin's baseline need, not the adjusted "actual" need, which
-		// already adds extra need after short nights and would double count.
-		if raw.SleepNeed != nil && raw.SleepNeed.Baseline != nil && *raw.SleepNeed.Baseline > 0 {
-			need := float64(*raw.SleepNeed.Baseline)
-			a.need.add(new(need / 60))
-			a.vsNeed.add(new(*so.SleepHours*60 - need))
-		}
-		a.score.add(so.Score)
-		a.awake.addInt(so.AwakeCount)
-		a.hr.add(so.AvgHR)
-		a.stress.add(so.AvgStress)
-		a.spo2.add(so.AvgSpO2)
-		a.low.add(so.LowestSpO2)
-		a.resp.add(so.AvgRespiration)
-		a.hrv.add(n.hrv)
-		if s, ok := sums[k]; ok {
-			a.rhr.addInt(s.HeartRate.RestingValue)
-		}
-		if so.DeepMin != nil && so.LightMin != nil && so.RemMin != nil {
-			if total := float64(*so.DeepMin + *so.LightMin + *so.RemMin); total > 0 {
-				a.deep.add(new(float64(*so.DeepMin) / total * 100))
-				a.light.add(new(float64(*so.LightMin) / total * 100))
-				a.rem.add(new(float64(*so.RemMin) / total * 100))
-			}
-		}
-		if *so.SleepHours < 6 {
-			out.Regularity.ShortNights++
-		}
-		for name, q := range so.SubScores {
-			if out.Qualifiers == nil {
-				out.Qualifiers = map[string]map[string]int{}
-			}
-			if out.Qualifiers[name] == nil {
-				out.Qualifiers[name] = map[string]int{}
-			}
-			out.Qualifiers[name][q]++
-		}
-	}
-	out.StageShare = SleepStageShare{Deep: a.deep.value(0), Light: a.light.value(0), REM: a.rem.value(0), Nights: a.deep.n}
-	avg := SleepAverages{
-		SleepHours: a.hours.value(2), SleepNeedHours: a.need.value(2), VsNeedMin: a.vsNeed.value(0),
-		Score: a.score.value(0), AwakeCount: a.awake.value(1), AvgHR: a.hr.value(0), RestingHR: a.rhr.value(0),
-		HRV: a.hrv.value(0), SleepStress: a.stress.value(0), SpO2: a.spo2.value(0), LowestSpO2: a.low.value(0),
-		Respiration: a.resp.value(1),
-	}
-	if avg.VsNeedMin != nil {
-		avg.WeeklyShortfallH = new(round(math.Max(0, -*avg.VsNeedMin)*7/60, 1))
-	}
-	return nights, avg
+// factorCond is one condition of the previous day (or of the night itself).
+type factorCond struct {
+	name string
+	test func(n night, dayBefore string) (applies, known bool)
 }
 
 // sleepFactors compares nights after days with and without each condition.
-func sleepFactors(nights []night, sums map[string]garmin.DailySummary, acts []garmin.Activity, onsets []float64) []SleepFactor {
-	lateWorkout := map[string]bool{}
-	dayLoad := map[string]float64{}
-	for _, a := range acts {
-		date := firstN(a.StartTimeLocal, 10)
-		if a.ActivityTrainingLoad != nil {
-			dayLoad[date] += *a.ActivityTrainingLoad
+func sleepFactors(nights []night, sums map[string]garmin.DailySummary, acts []garmin.Activity) []SleepFactor {
+	out := []SleepFactor{}
+	for _, c := range factorConds(nights, sums, acts) {
+		var sides [2]struct {
+			nights           int
+			score, hrv, hrSl mean
 		}
-		t, err := time.Parse(time.DateTime, firstN(a.StartTimeLocal, 19))
-		if err != nil || a.Duration == nil {
+		for _, n := range nights {
+			applies, known := c.test(n, n.date.AddDays(-1).String())
+			if !known {
+				continue
+			}
+			sd := &sides[0]
+			if applies {
+				sd = &sides[1]
+			}
+			sd.nights++
+			sd.score.add(n.s.Score)
+			sd.hrv.add(n.hrv)
+			sd.hrSl.add(n.s.AvgHR)
+		}
+		with, without := sides[1], sides[0]
+		if with.nights == 0 {
 			continue
 		}
-		if end := t.Add(time.Duration(*a.Duration * float64(time.Second))); end.Hour() >= 20 || civil.Of(end).String() != date {
-			lateWorkout[date] = true
+		f := SleepFactor{Factor: c.name, NightsWith: with.nights, NightsWithout: without.nights}
+		if with.nights >= minFactorNights && without.nights >= minFactorNights {
+			f.ScoreWith, f.ScoreWithout = with.score.value(0), without.score.value(0)
+			if f.ScoreWith != nil && f.ScoreWithout != nil {
+				f.ScoreDiff = new(round(*f.ScoreWith-*f.ScoreWithout, 0))
+			}
+			f.HRVWith, f.HRVWithout = with.hrv.value(0), without.hrv.value(0)
+			f.SleepHRWith, f.SleepHRWithout = with.hrSl.value(0), without.hrSl.value(0)
 		}
+		out = append(out, f)
 	}
+	return out
+}
 
-	// Personal thresholds from this period.
-	var stressDays, loads []float64
+// factorConds builds the conditions; thresholds are relative to the user's own period.
+func factorConds(nights []night, sums map[string]garmin.DailySummary, acts []garmin.Activity) []factorCond {
+	late, dayLoad := activityFacts(acts)
+	var stressDays, loads, onsets []float64
 	for _, s := range sums {
 		if s.Stress.AvgLevel != nil {
 			stressDays = append(stressDays, float64(*s.Stress.AvgLevel))
@@ -289,72 +347,56 @@ func sleepFactors(nights []night, sums map[string]garmin.DailySummary, acts []ga
 			loads = append(loads, l)
 		}
 	}
-
-	type cond struct {
-		name string
-		test func(n night, dayBefore string) (applies, known bool)
+	for _, n := range nights {
+		if n.hasTiming {
+			onsets = append(onsets, n.onset)
+		}
 	}
-	var conds []cond
+
+	var conds []factorCond
 	if len(stressDays) >= 10 {
 		p75 := percentile(stressDays, 75)
-		conds = append(conds, cond{fmt.Sprintf("stress above your usual the day before (top 25%% of your days, avg >= %.0f)", p75),
+		conds = append(conds, factorCond{fmt.Sprintf("stress above your usual the day before (top 25%% of your days, avg >= %.0f)", p75),
 			func(_ night, d string) (bool, bool) {
-				s, ok := sums[d]
-				if !ok || s.Stress.AvgLevel == nil {
-					return false, false
-				}
-				return float64(*s.Stress.AvgLevel) >= p75, true
+				v := sums[d].Stress.AvgLevel
+				return v != nil && float64(*v) >= p75, v != nil
 			}})
 	}
-	conds = append(conds, cond{"workout ending after 20:00 the day before", func(_ night, d string) (bool, bool) { return lateWorkout[d], true }})
+	conds = append(conds, factorCond{"workout ending after 20:00 the day before", func(_ night, d string) (bool, bool) { return late[d], true }})
 	if len(loads) >= 5 {
 		p75 := percentile(loads, 75)
-		conds = append(conds, cond{fmt.Sprintf("hard training day before (your top 25%% of training days, Garmin load >= %.0f)", p75),
+		conds = append(conds, factorCond{fmt.Sprintf("hard training day before (your top 25%% of training days, Garmin load >= %.0f)", p75),
 			func(_ night, d string) (bool, bool) { return dayLoad[d] >= p75, true }})
 	}
-	conds = append(conds, cond{"low daytime activity the day before (< 5000 steps)", func(_ night, d string) (bool, bool) {
-		s, ok := sums[d]
-		if !ok || s.Movement.Steps.Value == nil {
-			return false, false
-		}
-		return *s.Movement.Steps.Value < 5000, true
+	conds = append(conds, factorCond{"low daytime activity the day before (< 5000 steps)", func(_ night, d string) (bool, bool) {
+		v := sums[d].Movement.Steps.Value
+		return v != nil && *v < 5000, v != nil
 	}})
 	if len(onsets) >= 7 {
 		med := median(onsets)
-		conds = append(conds, cond{"sleep onset more than 45 min later than your median", func(n night, _ string) (bool, bool) {
+		conds = append(conds, factorCond{"sleep onset more than 45 min later than your median", func(n night, _ string) (bool, bool) {
 			return n.hasTiming && n.onset-med > 45, n.hasTiming
 		}})
 	}
+	return conds
+}
 
-	out := []SleepFactor{}
-	for _, c := range conds {
-		var sw, swo, hw, hwo, rw, rwo mean
-		for _, n := range nights {
-			applies, known := c.test(n, n.date.AddDays(-1).String())
-			if !known {
-				continue
-			}
-			if applies {
-				sw.add(n.s.Score)
-				hw.add(n.hrv)
-				rw.add(n.s.AvgHR)
-			} else {
-				swo.add(n.s.Score)
-				hwo.add(n.hrv)
-				rwo.add(n.s.AvgHR)
-			}
+// activityFacts returns, per local date, whether a workout ended after 20:00
+// (or past midnight) and the summed Garmin training load.
+func activityFacts(acts []garmin.Activity) (late map[string]bool, load map[string]float64) {
+	late, load = map[string]bool{}, map[string]float64{}
+	for _, a := range acts {
+		date := firstN(a.StartTimeLocal, 10)
+		if a.ActivityTrainingLoad != nil {
+			load[date] += *a.ActivityTrainingLoad
 		}
-		if sw.n == 0 {
+		t, err := time.Parse(time.DateTime, firstN(a.StartTimeLocal, 19))
+		if err != nil || a.Duration == nil {
 			continue
 		}
-		f := SleepFactor{Factor: c.name, NightsWith: sw.n, NightsWithout: swo.n}
-		if sw.n >= minFactorNights && swo.n >= minFactorNights {
-			f.ScoreWith, f.ScoreWithout = sw.value(0), swo.value(0)
-			f.ScoreDiff = new(round(*f.ScoreWith-*f.ScoreWithout, 0))
-			f.HRVWith, f.HRVWithout = hw.value(0), hwo.value(0)
-			f.SleepHRWith, f.SleepHRWithout = rw.value(0), rwo.value(0)
+		if end := t.Add(time.Duration(*a.Duration * float64(time.Second))); end.Hour() >= 20 || civil.Of(end).String() != date {
+			late[date] = true
 		}
-		out = append(out, f)
 	}
-	return out
+	return late, load
 }

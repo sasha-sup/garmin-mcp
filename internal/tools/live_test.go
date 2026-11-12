@@ -26,25 +26,16 @@ func TestLive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	key := os.Getenv(config.EnvAPIKey)
-	if key == "" {
-		key = os.Getenv(config.EnvAPIKeyAlias)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Skip(err)
 	}
-	if key == "" {
-		t.Skip("GARMIN_API_KEY not set (or pass GARMIN_ENV_FILE=.env)")
-	}
-	client, err := garmin.New(key)
+	client, err := garmin.New(cfg.APIKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	loc := time.Local
-	if tz := os.Getenv("GARMIN_TZ"); tz != "" {
-		if loc, err = time.LoadLocation(tz); err != nil {
-			t.Fatal(err)
-		}
-	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "garmin-mcp", Version: "live"}, nil)
-	Register(srv, garmin.NewService(client, nil, loc, nil), Options{})
+	Register(srv, garmin.NewService(client, nil, cfg.Location, nil), Options{})
 	st, ct := mcp.NewInMemoryTransports()
 	ctx := context.Background()
 	ss, err := srv.Connect(ctx, st, nil)
@@ -82,6 +73,10 @@ func TestLive(t *testing.T) {
 		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: c.name, Arguments: c.args})
 		if err != nil {
 			t.Errorf("%s: protocol error: %v", c.name, err)
+			continue
+		}
+		if len(res.Content) == 0 {
+			t.Errorf("%s: empty result", c.name)
 			continue
 		}
 		text := res.Content[0].(*mcp.TextContent).Text

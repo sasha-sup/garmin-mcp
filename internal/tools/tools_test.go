@@ -18,94 +18,120 @@ import (
 	"github.com/sasha-sup/garmin-mcp/internal/garmin"
 )
 
-// fakeGarmin serves synthetic data for every endpoint the tools use.
-func fakeGarmin(t *testing.T) *httptest.Server {
-	t.Helper()
+func fakeToken() string {
 	enc := base64.RawURLEncoding.EncodeToString
-	token := enc([]byte(`{}`)) + "." + enc(fmt.Appendf(nil, `{"exp":%d}`, time.Now().Add(time.Hour).Unix())) + ".c2ln"
+	return enc([]byte(`{}`)) + "." + enc(fmt.Appendf(nil, `{"exp":%d}`, time.Now().Add(time.Hour).Unix())) + ".c2ln"
+}
 
-	days := func(_ *http.Request, from, to string) []civil.Date {
-		f, _ := civil.Parse(from)
-		e, _ := civil.Parse(to)
-		return civil.Range(f, e)
-	}
-	join := func(items []string) string { return "[" + strings.Join(items, ",") + "]" }
-
+// newFakeAPI serves the token endpoint and passes authorised requests to h.
+func newFakeAPI(t *testing.T, h http.Handler) *httptest.Server {
+	t.Helper()
+	token := fakeToken()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p, q := r.URL.Path, r.URL.Query()
-		if p == "/personalapitoken-service/personal-api/personal-api-key/token" {
-			fmt.Fprint(w, token)
-			return
-		}
-		if r.Header.Get("Authorization") != "Bearer "+token {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		var items []string
 		switch {
-		case p == "/usersummary-service/v2/dailysummaries":
-			for i, d := range days(r, q.Get("startDate"), q.Get("endDate")) {
-				items = append(items, fmt.Sprintf(`{"calendarDate":%q,"movement":{"steps":{"value":%d,"goal":8000,"distanceInMeters":6500}},
-					"heartRate":{"restingValue":%d,"minValue":50,"maxValue":150},"stress":{"avgLevel":%d,"qualifier":"balanced"},
-					"bodyBattery":{"minValue":10,"maxValue":90},"intensityMinutes":{"moderate":20,"vigorous":10},"calories":{"burnedTotal":2500}}`,
-					d, 4000+i*500, 55+i%3, 25+i%30))
-			}
-			fmt.Fprintf(w, `{"data":%s}`, join(items))
-		case p == "/sleep-service/sleep/dailySleepSummariesByDate":
-			for i, d := range days(r, q.Get("startDate"), q.Get("endDate")) {
-				start := time.Date(2026, 1, 1, 23, i%4*15, 0, 0, time.UTC).UnixMilli()
-				items = append(items, fmt.Sprintf(`{"calendarDate":%q,"sleepTimeSeconds":%d,"deepSleepSeconds":5400,"lightSleepSeconds":14400,
-					"remSleepSeconds":6000,"awakeSleepSeconds":600,"sleepStartTimestampLocal":%d,"sleepEndTimestampLocal":%d,"awakeCount":1,
-					"avgHeartRate":58,"lowestSpO2Value":91,"sleepNeed":{"baseline":480,"actual":500},
-					"sleepScores":{"overall":{"value":%d,"qualifierKey":"GOOD"},"stress":{"qualifierKey":"FAIR"}}}`,
-					d, 24000+i*120, start, start+8*3600_000, 60+i%25))
-			}
-			fmt.Fprint(w, join(items))
-		case strings.HasPrefix(p, "/hrv-service/hrv/daily/"):
-			parts := strings.Split(p, "/")
-			for i, d := range days(r, parts[4], parts[5]) {
-				items = append(items, fmt.Sprintf(`{"calendarDate":%q,"lastNightAvg":%d,"weeklyAvg":45,"status":"BALANCED",
-					"baseline":{"balancedLow":38,"balancedUpper":55}}`, d, 40+i%10))
-			}
-			fmt.Fprintf(w, `{"hrvSummaries":%s}`, join(items))
-		case p == "/wellness-service/wellness/bodyBattery/reports/daily":
-			for _, d := range days(r, q.Get("startDate"), q.Get("endDate")) {
-				items = append(items, fmt.Sprintf(`{"date":%q,"charged":60,"drained":55,"bodyBatteryValuesArray":[[1767225600000,20],[1767254400000,80]],
-					"bodyBatteryActivityEvent":[{"eventType":"SLEEP","eventStartTimeGmt":"2026-01-01T20:00:00.0","timezoneOffset":14400000,
-					"durationInMilliseconds":28800000,"bodyBatteryImpact":55}]}`, d))
-			}
-			fmt.Fprint(w, join(items))
-		case p == "/wellness-service/wellness/dailyHeartRate":
-			fmt.Fprintf(w, `{"calendarDate":%q,"restingHeartRate":55,"heartRateValues":[[1767225600000,60],[1767225720000,70],[1767229200000,null]]}`, q.Get("date"))
-		case p == "/activitylist-service/activities/search/activities":
-			if q.Get("start") != "0" {
-				fmt.Fprint(w, "[]")
-				return
-			}
-			end, _ := civil.Parse(q.Get("endDate"))
-			fmt.Fprintf(w, `[{"activityId":11,"activityName":"Evening run","startTimeLocal":"%s 20:30:00","activityType":{"typeKey":"running"},
-				"distance":10000,"duration":3000,"averageSpeed":3.3333,"activityTrainingLoad":160,"hrTimeInZone_2":1200},
-				{"activityId":12,"activityName":"Ride","startTimeLocal":"%s 08:00:00","activityType":{"typeKey":"cycling"},
-				"distance":30000,"duration":3600,"averageSpeed":8.3333,"activityTrainingLoad":90}]`, end, end.AddDays(-3))
-		case p == "/activity-service/activity/11":
-			fmt.Fprint(w, `{"activityId":11,"activityName":"Evening run","activityTypeDTO":{"typeKey":"running"},"summaryDTO":{"distance":10000}}`)
-		case strings.HasPrefix(p, "/weight-service/weight/range/"):
-			parts := strings.Split(p, "/")
-			fmt.Fprintf(w, `{"dailyWeightSummaries":[{"summaryDate":%q,"latestWeight":{"weight":80500,"bodyFat":18.2}}]}`, parts[5])
-		case p == "/userprofile-service/userprofile/settings":
-			fmt.Fprint(w, `{"timeZone":"UTC","measurementSystem":"metric"}`)
-		case p == "/biometric-service/heartRateZones/v2":
-			fmt.Fprint(w, `[{"sport":"DEFAULT","zone1Floor":100,"maxHeartRateUsed":190}]`)
-		case strings.HasPrefix(p, "/fitnessage-service/fitnessage/v2/"):
-			fmt.Fprint(w, `{"chronologicalAge":35,"fitnessAge":30.5}`)
-		case strings.HasPrefix(p, "/wellness-service/wellness/daily/spo2acclimation/"):
-			fmt.Fprint(w, `{"averageSpO2":96}`)
+		case r.URL.Path == "/personalapitoken-service/personal-api/personal-api-key/token":
+			fmt.Fprint(w, token)
+		case r.Header.Get("Authorization") != "Bearer "+token:
+			w.WriteHeader(http.StatusUnauthorized)
 		default:
-			http.NotFound(w, r)
+			h.ServeHTTP(w, r)
 		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// fakeGarmin serves synthetic data for every endpoint the tools use.
+func fakeGarmin(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /usersummary-service/v2/dailysummaries", fakeSummaries)
+	mux.HandleFunc("GET /sleep-service/sleep/dailySleepSummariesByDate", fakeSleep)
+	mux.HandleFunc("GET /hrv-service/hrv/daily/{from}/{to}", fakeHRV)
+	mux.HandleFunc("GET /wellness-service/wellness/bodyBattery/reports/daily", fakeBodyBattery)
+	mux.HandleFunc("GET /activitylist-service/activities/search/activities", fakeActivities)
+	mux.HandleFunc("GET /weight-service/weight/range/{from}/{to}", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"dailyWeightSummaries":[{"summaryDate":%q,"latestWeight":{"weight":80500,"bodyFat":18.2}}]}`, r.PathValue("to"))
+	})
+	fixed := map[string]string{
+		"/wellness-service/wellness/dailyHeartRate":               `{"restingHeartRate":55,"heartRateValues":[[1767225600000,60],[1767225720000,70],[1767229200000,null]]}`,
+		"/activity-service/activity/11":                           `{"activityId":11,"activityName":"Evening run","activityTypeDTO":{"typeKey":"running"},"summaryDTO":{"distance":10000}}`,
+		"/userprofile-service/userprofile/settings":               `{"timeZone":"UTC","measurementSystem":"metric"}`,
+		"/biometric-service/heartRateZones/v2":                    `[{"sport":"DEFAULT","zone1Floor":100,"maxHeartRateUsed":190}]`,
+		"/fitnessage-service/fitnessage/v2/{date}":                `{"chronologicalAge":35,"fitnessAge":30.5}`,
+		"/wellness-service/wellness/daily/spo2acclimation/{date}": `{"averageSpO2":96}`,
+	}
+	for path, body := range fixed {
+		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, body) })
+	}
+	return newFakeAPI(t, mux)
+}
+
+// fakeDays returns the requested dates from query (startDate/endDate) or path ({from}/{to}).
+func fakeDays(r *http.Request) []civil.Date {
+	from, to := r.URL.Query().Get("startDate"), r.URL.Query().Get("endDate")
+	if from == "" {
+		from, to = r.PathValue("from"), r.PathValue("to")
+	}
+	f, _ := civil.Parse(from)
+	e, _ := civil.Parse(to)
+	return civil.Range(f, e)
+}
+
+// writeItems writes one formatted item per requested day as a JSON array.
+func writeItems(w http.ResponseWriter, r *http.Request, wrap string, item func(i int, d civil.Date) string) {
+	var items []string
+	for i, d := range fakeDays(r) {
+		items = append(items, item(i, d))
+	}
+	fmt.Fprintf(w, wrap, "["+strings.Join(items, ",")+"]")
+}
+
+func fakeSummaries(w http.ResponseWriter, r *http.Request) {
+	writeItems(w, r, `{"data":%s}`, func(i int, d civil.Date) string {
+		return fmt.Sprintf(`{"calendarDate":%q,"movement":{"steps":{"value":%d,"goal":8000,"distanceInMeters":6500}},
+			"heartRate":{"restingValue":%d,"minValue":50,"maxValue":150},"stress":{"avgLevel":%d,"qualifier":"balanced"},
+			"bodyBattery":{"minValue":10,"maxValue":90},"intensityMinutes":{"moderate":20,"vigorous":10},"calories":{"burnedTotal":2500}}`,
+			d, 4000+i*500, 55+i%3, 25+i%30)
+	})
+}
+
+func fakeSleep(w http.ResponseWriter, r *http.Request) {
+	writeItems(w, r, "%s", func(i int, d civil.Date) string {
+		start := time.Date(2026, 1, 1, 23, i%4*15, 0, 0, time.UTC).UnixMilli()
+		return fmt.Sprintf(`{"calendarDate":%q,"sleepTimeSeconds":%d,"deepSleepSeconds":5400,"lightSleepSeconds":14400,
+			"remSleepSeconds":6000,"awakeSleepSeconds":600,"sleepStartTimestampLocal":%d,"sleepEndTimestampLocal":%d,"awakeCount":1,
+			"avgHeartRate":58,"lowestSpO2Value":91,"sleepNeed":{"baseline":480,"actual":500},
+			"sleepScores":{"overall":{"value":%d,"qualifierKey":"GOOD"},"stress":{"qualifierKey":"FAIR"}}}`,
+			d, 24000+i*120, start, start+8*3600_000, 60+i%25)
+	})
+}
+
+func fakeHRV(w http.ResponseWriter, r *http.Request) {
+	writeItems(w, r, `{"hrvSummaries":%s}`, func(i int, d civil.Date) string {
+		return fmt.Sprintf(`{"calendarDate":%q,"lastNightAvg":%d,"weeklyAvg":45,"status":"BALANCED",
+			"baseline":{"balancedLow":38,"balancedUpper":55}}`, d, 40+i%10)
+	})
+}
+
+func fakeBodyBattery(w http.ResponseWriter, r *http.Request) {
+	writeItems(w, r, "%s", func(_ int, d civil.Date) string {
+		return fmt.Sprintf(`{"date":%q,"charged":60,"drained":55,"bodyBatteryValuesArray":[[1767225600000,20],[1767254400000,80]],
+			"bodyBatteryActivityEvent":[{"eventType":"SLEEP","eventStartTimeGmt":"2026-01-01T20:00:00.0","timezoneOffset":14400000,
+			"durationInMilliseconds":28800000,"bodyBatteryImpact":55}]}`, d)
+	})
+}
+
+func fakeActivities(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("start") != "0" {
+		fmt.Fprint(w, "[]")
+		return
+	}
+	end, _ := civil.Parse(r.URL.Query().Get("endDate"))
+	fmt.Fprintf(w, `[{"activityId":11,"activityName":"Evening run","startTimeLocal":"%s 20:30:00","activityType":{"typeKey":"running"},
+		"distance":10000,"duration":3000,"averageSpeed":3.3333,"activityTrainingLoad":160,"hrTimeInZone_2":1200},
+		{"activityId":12,"activityName":"Ride","startTimeLocal":"%s 08:00:00","activityType":{"typeKey":"cycling"},
+		"distance":30000,"duration":3600,"averageSpeed":8.3333,"activityTrainingLoad":90}]`, end, end.AddDays(-3))
 }
 
 func connect(t *testing.T) *mcp.ClientSession {
@@ -303,15 +329,9 @@ func TestPrompts(t *testing.T) {
 
 func TestRawTruncation(t *testing.T) {
 	big := strings.Repeat("я", rawLimit) // 2 bytes per rune
-	g := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/token") {
-			enc := base64.RawURLEncoding.EncodeToString
-			fmt.Fprint(w, enc([]byte(`{}`))+"."+enc(fmt.Appendf(nil, `{"exp":%d}`, time.Now().Add(time.Hour).Unix()))+".c2ln")
-			return
-		}
+	g := newFakeAPI(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, `{"x":%q}`, big)
 	}))
-	defer g.Close()
 	client, _ := garmin.New("k", garmin.WithBaseURL(g.URL))
 	h := &handlers{svc: garmin.NewService(client, nil, time.UTC, nil)}
 	res, _, err := h.apiGet(context.Background(), nil, RawInput{Endpoint: "profile_settings"})
@@ -337,15 +357,9 @@ func TestHeartRateBucketsOnDSTDay(t *testing.T) {
 	for ts := time.Date(2026, 3, 29, 0, 0, 0, 0, berlin); ts.Before(time.Date(2026, 3, 30, 0, 0, 0, 0, berlin)); ts = ts.Add(30 * time.Minute) {
 		vals = append(vals, fmt.Sprintf("[%d,60]", ts.UnixMilli()))
 	}
-	g := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/token") {
-			enc := base64.RawURLEncoding.EncodeToString
-			fmt.Fprint(w, enc([]byte(`{}`))+"."+enc(fmt.Appendf(nil, `{"exp":%d}`, time.Now().Add(time.Hour).Unix()))+".c2ln")
-			return
-		}
+	g := newFakeAPI(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, `{"calendarDate":"2026-03-29","heartRateValues":[%s]}`, strings.Join(vals, ","))
 	}))
-	defer g.Close()
 	client, _ := garmin.New("k", garmin.WithBaseURL(g.URL))
 	h := &handlers{svc: garmin.NewService(client, nil, berlin, nil)}
 	_, out, err := h.heartRate(context.Background(), nil, HeartRateInput{Date: "2026-03-29", IntervalMinutes: 240})

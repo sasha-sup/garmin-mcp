@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -10,8 +11,8 @@ import (
 
 type promptDef struct {
 	name, title, desc string
-	defaultDays       int
-	body              string // %d = days
+	defaultDays       int    // 0: the prompt takes no "days" argument
+	body              string // %d = days when defaultDays > 0
 }
 
 var prompts = []promptDef{
@@ -38,39 +39,46 @@ var prompts = []promptDef{
 5. Flag anything that may warrant a doctor (e.g. persistently rising resting HR, very low SpO2). This is not medical advice.`,
 	},
 	{
-		name: "readiness_check", title: "Readiness for today", defaultDays: 1,
+		name: "readiness_check", title: "Readiness for today",
 		desc: "Decide how hard to train or how much to push today based on recovery.",
 		body: `Using garmin_recovery_status for today (and garmin_activities for the last 7 days if useful), tell me how recovered I am.
-Answer in three parts: verdict (rest / easy / normal / hard is fine), the 2-3 metrics that drive the verdict with my numbers, and one practical suggestion for today and tonight's sleep. Period hint: %d day(s).`,
+Answer in three parts: verdict (rest / easy / normal / hard is fine), the 2-3 metrics that drive the verdict with my numbers, and one practical suggestion for today and tonight's sleep.`,
 	},
 }
 
 func registerPrompts(srv *mcp.Server) {
 	for _, p := range prompts {
-		srv.AddPrompt(&mcp.Prompt{
-			Name:        p.name,
-			Title:       p.title,
-			Description: p.desc,
-			Arguments: []*mcp.PromptArgument{{
+		prompt := &mcp.Prompt{Name: p.name, Title: p.title, Description: p.desc}
+		if p.defaultDays > 0 {
+			prompt.Arguments = []*mcp.PromptArgument{{
 				Name:        "days",
 				Description: fmt.Sprintf("Number of days to review (default %d).", p.defaultDays),
-			}},
-		}, func(_ context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-			days := p.defaultDays
-			if s := req.Params.Arguments["days"]; s != "" {
-				n, err := strconv.Atoi(s)
-				if err != nil || n < 1 || n > 366 {
-					return nil, fmt.Errorf("days must be a number between 1 and 366")
-				}
-				days = n
+			}}
+		}
+		srv.AddPrompt(prompt, func(_ context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			text, err := p.render(req.Params.Arguments["days"])
+			if err != nil {
+				return nil, err
 			}
 			return &mcp.GetPromptResult{
 				Description: p.desc,
-				Messages: []*mcp.PromptMessage{{
-					Role:    "user",
-					Content: &mcp.TextContent{Text: fmt.Sprintf(p.body, days)},
-				}},
+				Messages:    []*mcp.PromptMessage{{Role: "user", Content: &mcp.TextContent{Text: text}}},
 			}, nil
 		})
 	}
+}
+
+func (p promptDef) render(daysArg string) (string, error) {
+	if p.defaultDays == 0 {
+		return p.body, nil
+	}
+	days := p.defaultDays
+	if daysArg != "" {
+		n, err := strconv.Atoi(daysArg)
+		if err != nil || n < 1 || n > 366 {
+			return "", errors.New("days must be a number between 1 and 366")
+		}
+		days = n
+	}
+	return fmt.Sprintf(p.body, days), nil
 }

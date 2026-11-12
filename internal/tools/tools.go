@@ -7,6 +7,7 @@ package tools
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"time"
@@ -46,99 +47,72 @@ type Options struct {
 // Register adds every tool and prompt to srv.
 func Register(srv *mcp.Server, svc *garmin.Service, opts Options) {
 	h := &handlers{svc: svc, opts: opts}
-	ro := func(title string) *mcp.ToolAnnotations {
-		return &mcp.ToolAnnotations{Title: title, ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: new(true)}
-	}
+	addTool(srv, "garmin_daily_summary", "Daily summary",
+		"Per-day wellness totals: steps, distance, calories, resting/min/max heart rate, intensity minutes, stress, Body Battery range, respiration, SpO2. Range up to 366 days, default last 7.",
+		h.dailySummary)
+	addTool(srv, "garmin_sleep", "Sleep",
+		"Per-night sleep: bedtime, wake time, duration, deep/light/REM/awake minutes, sleep score with sub-scores, average heart rate, sleep stress, SpO2, respiration, sleep need and Garmin's feedback. Filed under the wake-up date. Range up to 366 days, default last 7.",
+		h.sleep)
+	addTool(srv, "garmin_sleep_analysis", "Sleep analysis",
+		"Sleep quality analysis over a period (default 28 days, up to 366): average duration vs Garmin's baseline sleep need and weekly shortfall, regularity (median sleep onset and wake time, spread, weekday-weekend shift), stage shares, sub-score counts, score trend, "+
+			"sleep heart rate, HRV, resting HR, SpO2, respiration, and factors from the previous day (stress above usual, late or hard workouts, low activity, late sleep onset) compared with sleep score, HRV and sleep HR. Use this first for sleep questions and recommendations.",
+		h.sleepAnalysis)
+	addTool(srv, "garmin_hrv", "HRV",
+		"Per-night heart rate variability (HRV, ms): last-night average, 5-minute high, 7-day average, personal baseline band and Garmin's status (BALANCED, UNBALANCED, LOW, POOR). Range up to 366 days, default last 14.",
+		h.hrv)
+	addTool(srv, "garmin_body_battery", "Body Battery",
+		"Per-day Body Battery (Garmin's 0-100 energy estimate): charged, drained, min/max, events that changed it (sleep, activities, naps) and Garmin's feedback. Optional intraday timeline. Range up to 31 days, default last 3.",
+		h.bodyBattery)
+	addTool(srv, "garmin_heart_rate", "Heart rate (one day)",
+		"Intraday heart rate for one day, aggregated into local-time intervals (avg/min/max bpm per interval), plus resting, min, max and 7-day resting average.",
+		h.heartRate)
+	addTool(srv, "garmin_activities", "Activities",
+		"List workouts in a date range, newest first: type, duration, distance, pace or speed, heart rate, time in HR zones, training load, training effect, VO2max, Body Battery impact, sets/reps. Default last 30 days, up to 100 items.",
+		h.activities)
+	addTool(srv, "garmin_activity", "Activity details",
+		"Full summary of one workout by activity_id (from garmin_activities): all measurements Garmin computed, including temperature, cadence, power, training effect messages.",
+		h.activity)
+	addTool(srv, "garmin_recovery_status", "Recovery status",
+		"Readiness snapshot for one day (default today): last night's sleep; HRV, resting HR, sleep HR, breathing rate and yesterday's stress each compared with the user's own previous 28 days (mean, SD, z-score, days of history); Body Battery recharge; training load of the last 7 vs 28 days; plain-language signals with the method used. Use this first for 'how recovered am I' questions.",
+		h.recoveryStatus)
+	addTool(srv, "garmin_trends", "Trends",
+		"Weekly or monthly averages over a long period (default 12 weeks, up to 2 years): resting HR, HRV, sleep duration and score, steps, stress, Body Battery peak, intensity minutes, workout count, workout time, training load, weight. Small output; use it for progress and long-term patterns.",
+		h.trends)
+	addTool(srv, "garmin_profile", "Profile",
+		"User context for interpreting other data: time zone and units, heart rate zones per sport, Fitness Age with its components, latest weight.",
+		h.profile)
+	addTool(srv, "garmin_weight", "Weight",
+		"Daily weigh-ins: weight (kg), BMI, body fat, muscle mass, body water where available. Range up to 2 years, default last 90 days.",
+		h.weight)
+	registerRawTool(srv, h)
+	registerPrompts(srv)
+}
 
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "garmin_daily_summary",
-		Description: "Per-day wellness totals: steps, distance, calories, resting/min/max heart rate, intensity minutes, stress, Body Battery range, respiration, SpO2. Range up to 366 days, default last 7.",
-		Annotations: ro("Daily summary"),
-	}, h.dailySummary)
+// addTool registers a read-only tool whose schemas are inferred from In and Out.
+func addTool[In, Out any](srv *mcp.Server, name, title, desc string, h mcp.ToolHandlerFor[In, Out]) {
+	mcp.AddTool(srv, &mcp.Tool{Name: name, Description: desc, Annotations: readOnly(title)}, h)
+}
 
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "garmin_sleep",
-		Description: "Per-night sleep: bedtime, wake time, duration, deep/light/REM/awake minutes, sleep score with sub-scores, average heart rate, sleep stress, SpO2, respiration, sleep need and Garmin's feedback. Filed under the wake-up date. Range up to 366 days, default last 7.",
-		Annotations: ro("Sleep"),
-	}, h.sleep)
+func readOnly(title string) *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{Title: title, ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: new(true)}
+}
 
-	mcp.AddTool(srv, &mcp.Tool{
-		Name: "garmin_sleep_analysis",
-		Description: "Sleep quality analysis over a period (default 28 days, up to 366): average duration vs sleep need and weekly sleep debt, regularity (median bedtime/wake time, spread, weekday-weekend shift), stage shares, sub-score counts, score trend, " +
-			"sleep heart rate, HRV, resting HR, SpO2, respiration, and factors from the previous day (stress, late or hard workouts, low activity, late bedtime) compared with sleep score. Use this first for sleep questions and recommendations.",
-		Annotations: ro("Sleep analysis"),
-	}, h.sleepAnalysis)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "garmin_hrv",
-		Description: "Per-night heart rate variability (HRV, ms): last-night average, 5-minute high, 7-day average, personal baseline band and Garmin's status (BALANCED, UNBALANCED, LOW, POOR). Range up to 366 days, default last 14.",
-		Annotations: ro("HRV"),
-	}, h.hrv)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "garmin_body_battery",
-		Description: "Per-day Body Battery (Garmin's 0-100 energy estimate): charged, drained, min/max, events that changed it (sleep, activities, naps) and Garmin's feedback. Optional intraday timeline. Range up to 31 days, default last 3.",
-		Annotations: ro("Body Battery"),
-	}, h.bodyBattery)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "garmin_heart_rate",
-		Description: "Intraday heart rate for one day, aggregated into local-time intervals (avg/min/max bpm per interval), plus resting, min, max and 7-day resting average.",
-		Annotations: ro("Heart rate (one day)"),
-	}, h.heartRate)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "garmin_activities",
-		Description: "List workouts in a date range, newest first: type, duration, distance, pace or speed, heart rate, time in HR zones, training load, training effect, VO2max, Body Battery impact, sets/reps. Default last 30 days, up to 100 items.",
-		Annotations: ro("Activities"),
-	}, h.activities)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "garmin_activity",
-		Description: "Full summary of one workout by activity_id (from garmin_activities): all measurements Garmin computed, including temperature, cadence, power, training effect messages.",
-		Annotations: ro("Activity details"),
-	}, h.activity)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "garmin_recovery_status",
-		Description: "Readiness snapshot for one day (default today): last night's sleep; HRV, resting HR, sleep HR, breathing rate and yesterday's stress each compared with the user's own previous 28 days (mean, SD, z-score, days of history); Body Battery recharge; training load of the last 7 vs 28 days; plain-language signals with the method used. Use this first for 'how recovered am I' questions.",
-		Annotations: ro("Recovery status"),
-	}, h.recoveryStatus)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "garmin_trends",
-		Description: "Weekly or monthly averages over a long period (default 12 weeks, up to 2 years): resting HR, HRV, sleep duration and score, steps, stress, Body Battery peak, intensity minutes, workout count, workout time, training load, weight. Small output; use it for progress and long-term patterns.",
-		Annotations: ro("Trends"),
-	}, h.trends)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "garmin_profile",
-		Description: "User context for interpreting other data: time zone and units, heart rate zones per sport, Fitness Age with its components, latest weight.",
-		Annotations: ro("Profile"),
-	}, h.profile)
-
-	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "garmin_weight",
-		Description: "Daily weigh-ins: weight (kg), BMI, body fat, muscle mass, body water where available. Range up to 2 years, default last 90 days.",
-		Annotations: ro("Weight"),
-	}, h.weight)
-
-	rawSchema, err := jsonschema.For[RawInput](nil)
+// registerRawTool adds garmin_api_get with the enabled endpoint names as an enum.
+func registerRawTool(srv *mcp.Server, h *handlers) {
+	schema, err := jsonschema.For[RawInput](nil)
 	if err != nil {
 		panic(fmt.Sprintf("raw tool schema: %v", err)) // static type: fails in tests, never at runtime
 	}
-	for _, n := range RawEndpointNames(opts.AllowSensitive) {
-		rawSchema.Properties["endpoint"].Enum = append(rawSchema.Properties["endpoint"].Enum, n)
+	for _, n := range RawEndpointNames(h.opts.AllowSensitive) {
+		schema.Properties["endpoint"].Enum = append(schema.Properties["endpoint"].Enum, n)
 	}
 	mcp.AddTool(srv, &mcp.Tool{
-		InputSchema: rawSchema,
 		Name:        "garmin_api_get",
+		InputSchema: schema,
+		Annotations: readOnly("Raw Garmin API"),
 		Description: "Raw JSON from a Garmin Personal API endpoint not covered by other tools (SpO2 detail, stress/steps series, hydration, nutrition, menstrual cycle, fitness age history, HRV readings). " +
 			"Responses are large and truncated at 100 KB: prefer the dedicated tools.",
-		Annotations: ro("Raw Garmin API"),
 	}, h.apiGet)
-
-	registerPrompts(srv)
 }
 
 type handlers struct {
@@ -201,14 +175,7 @@ func (h *handlers) parseDay(s string) (civil.Date, error) {
 }
 
 // sortedKeys returns map keys (YYYY-MM-DD dates) in ascending order.
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	return keys
-}
+func sortedKeys[V any](m map[string]V) []string { return slices.Sorted(maps.Keys(m)) }
 
 func round(v float64, places int) float64 {
 	p := math.Pow10(places)

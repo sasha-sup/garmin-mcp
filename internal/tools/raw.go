@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -89,46 +90,14 @@ func (h *handlers) apiGet(ctx context.Context, _ *mcp.CallToolRequest, in RawInp
 	if ep.sensitive && !h.opts.AllowSensitive {
 		return nil, nil, fmt.Errorf("endpoint %s returns reproductive-health or nutrition data and is disabled; the user can enable it with GARMIN_ALLOW_SENSITIVE=1", in.Endpoint)
 	}
-	path := ep.path
-	fill := func(placeholder, value, name string) error {
-		if !strings.Contains(path, placeholder) {
-			return nil
-		}
-		if value == "" {
-			return fmt.Errorf("endpoint %s needs %s", in.Endpoint, name)
-		}
-		d, err := civil.Parse(value)
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		path = strings.Replace(path, placeholder, d.String(), 1)
-		return nil
-	}
-	if err := errors.Join(
-		fill("{date}", in.Date, "date"),
-		fill("{start}", in.StartDate, "start_date"),
-		fill("{end}", in.EndDate, "end_date"),
-	); err != nil {
+	path, err := rawPath(ep, in)
+	if err != nil {
 		return nil, nil, err
 	}
-	if strings.Contains(path, "{id}") {
-		if in.ActivityID <= 0 {
-			return nil, nil, fmt.Errorf("endpoint %s needs activity_id", in.Endpoint)
-		}
-		path = strings.Replace(path, "{id}", fmt.Sprint(in.ActivityID), 1)
+	q, err := rawQuery(ep, in)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	q := url.Values{}
-	for k, v := range in.Query {
-		if !slices.Contains(ep.query, k) {
-			return nil, nil, fmt.Errorf("query key %q is not allowed for %s; allowed: %v", k, in.Endpoint, ep.query)
-		}
-		if !queryValueRE.MatchString(v) {
-			return nil, nil, fmt.Errorf("query value for %q contains unsupported characters", k)
-		}
-		q.Set(k, v)
-	}
-
 	body, err := h.svc.Client().Get(ctx, path, q)
 	if errors.Is(err, garmin.ErrNoData) {
 		return textResult("Garmin returned no data (HTTP 204) for this request."), nil, nil
@@ -136,15 +105,59 @@ func (h *handlers) apiGet(ctx context.Context, _ *mcp.CallToolRequest, in RawInp
 	if err != nil {
 		return nil, nil, err
 	}
-	text := string(body)
-	if len(text) > rawLimit {
-		cut := rawLimit
-		for cut > 0 && !utf8.RuneStart(text[cut]) {
-			cut--
+	return textResult(truncateRaw(body)), nil, nil
+}
+
+// rawPath fills the endpoint's path placeholders from validated input only.
+func rawPath(ep rawEndpoint, in RawInput) (string, error) {
+	path := ep.path
+	for _, p := range []struct{ placeholder, value, name string }{
+		{"{date}", in.Date, "date"},
+		{"{start}", in.StartDate, "start_date"},
+		{"{end}", in.EndDate, "end_date"},
+	} {
+		if !strings.Contains(path, p.placeholder) {
+			continue
 		}
-		text = text[:cut] + fmt.Sprintf("\n…[truncated: response is %d bytes, showing the first %d; narrow the date range]", len(body), cut)
+		d, err := civil.Parse(p.value)
+		if err != nil {
+			return "", fmt.Errorf("endpoint %s needs %s: %w", in.Endpoint, p.name, err)
+		}
+		path = strings.Replace(path, p.placeholder, d.String(), 1)
 	}
-	return textResult(text), nil, nil
+	if strings.Contains(path, "{id}") {
+		if in.ActivityID <= 0 {
+			return "", fmt.Errorf("endpoint %s needs activity_id", in.Endpoint)
+		}
+		path = strings.Replace(path, "{id}", strconv.FormatInt(in.ActivityID, 10), 1)
+	}
+	return path, nil
+}
+
+func rawQuery(ep rawEndpoint, in RawInput) (url.Values, error) {
+	q := url.Values{}
+	for k, v := range in.Query {
+		if !slices.Contains(ep.query, k) {
+			return nil, fmt.Errorf("query key %q is not allowed for %s; allowed: %v", k, in.Endpoint, ep.query)
+		}
+		if !queryValueRE.MatchString(v) {
+			return nil, fmt.Errorf("query value for %q contains unsupported characters", k)
+		}
+		q.Set(k, v)
+	}
+	return q, nil
+}
+
+// truncateRaw cuts body at rawLimit on a UTF-8 boundary and says so.
+func truncateRaw(body []byte) string {
+	if len(body) <= rawLimit {
+		return string(body)
+	}
+	cut := rawLimit
+	for cut > 0 && !utf8.RuneStart(body[cut]) {
+		cut--
+	}
+	return string(body[:cut]) + fmt.Sprintf("\n…[truncated: response is %d bytes, showing the first %d; narrow the date range]", len(body), cut)
 }
 
 func textResult(s string) *mcp.CallToolResult {

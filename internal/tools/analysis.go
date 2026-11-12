@@ -70,109 +70,110 @@ func (h *handlers) trends(ctx context.Context, _ *mcp.CallToolRequest, in Trends
 	if days < 14 || days > 731 {
 		return nil, TrendsOut{}, fmt.Errorf("days must be between 14 and 731, got %d", days)
 	}
-	from, to, err := h.resolve(RangeInput{EndDate: in.EndDate, Days: days}, days, 731)
+	from, to, err := h.resolve(RangeInput{EndDate: in.EndDate, Days: days}, 0, 731)
+	if err != nil {
+		return nil, TrendsOut{}, err
+	}
+	d := trendData{period: period, byStart: map[string]*trendAcc{}}
+	err = fetchAll(
+		func() (err error) { d.sleep, err = h.svc.Sleep(ctx, from, to); return },
+		func() (err error) { d.hrv, err = h.svc.HRV(ctx, from, to); return },
+		func() (err error) { d.sums, err = h.svc.DailySummaries(ctx, from, to); return },
+		func() (err error) { d.weight, err = h.svc.Weight(ctx, from, to); return },
+		func() (err error) { d.acts, err = h.svc.Activities(ctx, from, to, "", "", maxTrendActivities); return },
+	)
 	if err != nil {
 		return nil, TrendsOut{}, err
 	}
 
-	var (
-		wg                                sync.WaitGroup
-		sleep                             map[string]garmin.DailySleep
-		hrv                               map[string]garmin.HRVSummary
-		sums                              map[string]garmin.DailySummary
-		weight                            map[string]garmin.WeightSample
-		acts                              []garmin.Activity
-		eSleep, eHRV, eSum, eWeight, eAct error
-	)
-	wg.Go(func() { sleep, eSleep = h.svc.Sleep(ctx, from, to) })
-	wg.Go(func() { hrv, eHRV = h.svc.HRV(ctx, from, to) })
-	wg.Go(func() { sums, eSum = h.svc.DailySummaries(ctx, from, to) })
-	wg.Go(func() { weight, eWeight = h.svc.Weight(ctx, from, to) })
-	wg.Go(func() { acts, eAct = h.svc.Activities(ctx, from, to, "", "", maxTrendActivities) })
-	wg.Wait()
-	for _, e := range []error{eSleep, eHRV, eSum, eWeight, eAct} {
-		if e != nil {
-			return nil, TrendsOut{}, e
-		}
+	for _, day := range civil.Range(from, to) {
+		d.addDay(day)
 	}
-
-	bucketOf := func(d civil.Date) civil.Date {
-		if period == "month" {
-			return d.Month()
-		}
-		return d.AddDays(-((int(d.Weekday()) + 6) % 7)) // Monday
-	}
-	type acc struct {
-		b                                             TrendBucket
-		rhr, hrv, sleepH, score, steps, stress, bb, w mean
-	}
-	accs := map[string]*acc{}
-	var order []string
-	get := func(d civil.Date) *acc {
-		k := bucketOf(d).String()
-		a, ok := accs[k]
-		if !ok {
-			a = &acc{b: TrendBucket{Start: k}}
-			accs[k] = a
-			order = append(order, k)
-		}
-		return a
-	}
-	for _, d := range civil.Range(from, to) {
-		a := get(d)
-		a.b.CalendarDays++
-		k := d.String()
-		if s, ok := sums[k]; ok {
-			a.b.DaysWithData++
-			a.rhr.addInt(s.HeartRate.RestingValue)
-			a.steps.addInt(s.Movement.Steps.Value)
-			a.stress.addInt(s.Stress.AvgLevel)
-			a.bb.addInt(s.BodyBattery.MaxValue)
-			a.b.IntensityMin += deref(s.IntensityMinutes.Moderate) + 2*deref(s.IntensityMinutes.Vigorous)
-		}
-		if s, ok := sleep[k]; ok {
-			so := sleepOut(s)
-			a.sleepH.add(so.SleepHours)
-			a.score.add(so.Score)
-		}
-		if v, ok := hrv[k]; ok {
-			a.hrv.addInt(v.LastNightAvg)
-		}
-		if w, ok := weight[k]; ok {
-			a.w.add(scaled(w.Weight, 0.001, 2))
-		}
-	}
-	for _, act := range acts {
-		d, err := civil.Parse(firstN(act.StartTimeLocal, 10))
-		if err != nil || d.Before(from) || d.After(to) {
-			continue
-		}
-		a := get(d)
-		a.b.Workouts++
-		if act.Duration != nil {
-			a.b.WorkoutMin += int(math.Round(*act.Duration / 60))
-		}
-		if act.ActivityTrainingLoad != nil {
-			a.b.TrainingLoad += int(math.Round(*act.ActivityTrainingLoad))
+	for _, act := range d.acts {
+		if day, err := civil.Parse(firstN(act.StartTimeLocal, 10)); err == nil && !day.Before(from) && !day.After(to) {
+			d.bucket(day).addActivity(act)
 		}
 	}
 	out := TrendsOut{From: from.String(), To: to.String(), Period: period, Buckets: []TrendBucket{},
 		Note: "Averages ignore days without data. Intensity minutes count vigorous minutes twice (WHO convention, as Garmin does); compare intensity_minutes_per_7d with the WHO target of 150. The first and last buckets may be partial: check calendar_days and days_with_data."}
-	if len(acts) >= maxTrendActivities {
+	if len(d.acts) >= maxTrendActivities {
 		out.Warning = fmt.Sprintf("more than %d activities in this period: the oldest buckets undercount workouts and load; use a shorter period", maxTrendActivities)
 	}
-	for _, k := range order {
-		a := accs[k]
-		a.b.RestingHR, a.b.HRV = a.rhr.value(1), a.hrv.value(1)
-		a.b.SleepHours, a.b.SleepScore = a.sleepH.value(2), a.score.value(0)
-		a.b.Steps, a.b.Stress, a.b.BodyBatteryMax = a.steps.value(0), a.stress.value(0), a.bb.value(0)
-		a.b.WeightKg = a.w.value(1)
-		if a.b.CalendarDays > 0 {
-			a.b.IntensityPer7d = int(math.Round(float64(a.b.IntensityMin) * 7 / float64(a.b.CalendarDays)))
-		}
-		out.Buckets = append(out.Buckets, a.b)
+	for _, k := range d.order {
+		out.Buckets = append(out.Buckets, d.byStart[k].result())
 	}
 	return nil, out, nil
+}
+
+// trendData holds the fetched data and the buckets in chronological order.
+type trendData struct {
+	period  string
+	sleep   map[string]garmin.DailySleep
+	hrv     map[string]garmin.HRVSummary
+	sums    map[string]garmin.DailySummary
+	weight  map[string]garmin.WeightSample
+	acts    []garmin.Activity
+	byStart map[string]*trendAcc
+	order   []string
+}
+
+type trendAcc struct {
+	b                                             TrendBucket
+	rhr, hrv, sleepH, score, steps, stress, bb, w mean
+}
+
+// bucket returns the week (Monday-based) or month bucket containing day.
+func (d *trendData) bucket(day civil.Date) *trendAcc {
+	start := day.AddDays(-((int(day.Weekday()) + 6) % 7))
+	if d.period == "month" {
+		start = day.Month()
+	}
+	k := start.String()
+	a, ok := d.byStart[k]
+	if !ok {
+		a = &trendAcc{b: TrendBucket{Start: k}}
+		d.byStart[k] = a
+		d.order = append(d.order, k)
+	}
+	return a
+}
+
+func (d *trendData) addDay(day civil.Date) {
+	a, k := d.bucket(day), day.String()
+	a.b.CalendarDays++
+	if s, ok := d.sums[k]; ok {
+		a.b.DaysWithData++
+		a.rhr.addInt(s.HeartRate.RestingValue)
+		a.steps.addInt(s.Movement.Steps.Value)
+		a.stress.addInt(s.Stress.AvgLevel)
+		a.bb.addInt(s.BodyBattery.MaxValue)
+		a.b.IntensityMin += deref(s.IntensityMinutes.Moderate) + 2*deref(s.IntensityMinutes.Vigorous)
+	}
+	so := sleepOut(d.sleep[k])
+	a.sleepH.add(so.SleepHours)
+	a.score.add(so.Score)
+	a.hrv.addInt(d.hrv[k].LastNightAvg)
+	a.w.add(scaled(d.weight[k].Weight, 0.001, 2))
+}
+
+func (a *trendAcc) addActivity(act garmin.Activity) {
+	a.b.Workouts++
+	if act.Duration != nil {
+		a.b.WorkoutMin += int(math.Round(*act.Duration / 60))
+	}
+	if act.ActivityTrainingLoad != nil {
+		a.b.TrainingLoad += int(math.Round(*act.ActivityTrainingLoad))
+	}
+}
+
+func (a *trendAcc) result() TrendBucket {
+	b := a.b
+	b.RestingHR, b.HRV = a.rhr.value(1), a.hrv.value(1)
+	b.SleepHours, b.SleepScore = a.sleepH.value(2), a.score.value(0)
+	b.Steps, b.Stress, b.BodyBatteryMax = a.steps.value(0), a.stress.value(0), a.bb.value(0)
+	b.WeightKg = a.w.value(1)
+	b.IntensityPer7d = int(math.Round(float64(b.IntensityMin) * 7 / float64(b.CalendarDays)))
+	return b
 }
 
 // --- garmin_profile ---
