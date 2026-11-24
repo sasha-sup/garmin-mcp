@@ -1,6 +1,6 @@
 # garmin-mcp
 
-[![CI](https://github.com/sasha-sup/garmin-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/sasha-sup/garmin-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/sasha-sup/garmin-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/sasha-sup/garmin-mcp/actions/workflows/ci.yml) [![sasha-sup/garmin-mcp MCP server](https://glama.ai/mcp/servers/sasha-sup/garmin-mcp/badges/score.svg)](https://glama.ai/mcp/servers/sasha-sup/garmin-mcp)
 
 **English** | [Русский](README.ru.md)
 
